@@ -32,7 +32,7 @@
 ### 4.1 REST API (MVP)
 - `GET /api/health` -> `200 OK`
 - `GET /api/agents` -> список агентов (`id`, `name`, `avatar`, `mood`, `mood_label`, `current_plan`)
-- `GET /api/state` -> стартовый снапшот мира
+- `GET /api/state` -> стартовый снапшот мира (`server_time`, `agents`, `relations`, `events`)
 - `GET /api/agents/{id}` -> профиль агента (`traits`, `mood`, `current_plan`, `key_memories`, `recent_events`)
 - `GET /api/relations` -> граф отношений (`nodes`, `edges`)
 - `GET /api/events?limit=...&agent_id=...` -> лента событий
@@ -66,7 +66,8 @@
   "pos": { "x": 12.3, "y": 0.0, "z": -4.1 },
   "look_at": { "x": 0.0, "y": 0.0, "z": 1.0 },
   "last_action": "say",
-  "last_say": "Прасти меня."
+  "last_say": "Прасти меня.",
+  "tick" : 42
 }
 ```
 
@@ -78,7 +79,8 @@
   "source_type": "agent|world",
   "source_id": "a1|null",
   "text": "Alice said: ...",
-  "tags": ["dialogue"]
+  "tags": ["dialogue"],
+  "tick": 52
 }
 ```
 
