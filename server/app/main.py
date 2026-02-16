@@ -4,9 +4,9 @@ import asyncio
 import contextlib
 import json
 import os
-from random import uniform
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.models import ControlEventIn, ControlMessageIn, ControlSpeedIn
 from app.sim.engine import StubWorld
@@ -50,19 +50,25 @@ class WsHub:
                     self._clients.discard(ws)
 
 
-TICK_MIN_SEC = float(os.getenv("TICK_MIN_SEC", "0.5"))
-TICK_MAX_SEC = float(os.getenv("TICK_MAX_SEC", "2.0"))
+TICK_INTERVAL_SEC = float(os.getenv("TICK_INTERVAL_SEC", "1.0"))
 RELATIONS_INTERVAL_TICKS = int(os.getenv("RELATIONS_INTERVAL_TICKS", "5"))
 
 app = FastAPI(title="Skebobia Day 0 Stub Server", version="0.1.0")
 world = StubWorld(relations_interval_ticks=RELATIONS_INTERVAL_TICKS)
 hub = WsHub()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 async def tick_loop() -> None:
     while True:
-        interval = uniform(max(0.1, TICK_MIN_SEC), max(TICK_MIN_SEC, TICK_MAX_SEC))
-        await asyncio.sleep(interval / max(world.speed, 0.1))
+        await asyncio.sleep(max(0.1, TICK_INTERVAL_SEC) / max(world.speed, 0.1))
 
         result = world.step()
         await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
@@ -127,6 +133,8 @@ async def events(
 async def control_event(payload: ControlEventIn) -> dict:
     event = world.add_world_event(payload.text, payload.importance)
     await hub.broadcast({"type": "event", "payload": event})
+    await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
+    await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
     return {"event_id": event["id"]}
 
 
@@ -137,6 +145,8 @@ async def control_message(payload: ControlMessageIn) -> dict:
     except KeyError:
         raise HTTPException(status_code=404, detail="agent not found") from None
     await hub.broadcast({"type": "event", "payload": event})
+    await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
+    await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
     return {"accepted": True}
 
 

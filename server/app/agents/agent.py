@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from random import choice
 
 
 @dataclass
@@ -26,7 +25,7 @@ def mood_label(mood: int) -> str:
     return "excited"
 
 
-def plan_for_mood(label: str) -> str:
+def plan_for_mood(label: str, selector: int = 0) -> str:
     plans = {
         "angry": ["пойду охлажу свое трахание", "я уже не скебоб я зверь нахер пойду спать"],
         "sad": ["пойду поною кому нибудь", "гуляю как дед инсайд"],
@@ -34,7 +33,8 @@ def plan_for_mood(label: str) -> str:
         "happy": ["хочет по доброму поговорить", "приветвтовать соседей"],
         "excited": ["рассказать всем хорошие новости", "двигается быстро"],
     }
-    return choice(plans[label])
+    options = plans.get(label, plans["neutral"])
+    return options[abs(int(selector)) % len(options)]
 
 
 @dataclass
@@ -58,6 +58,7 @@ class AgentState:
         return {
             "id": self.id,
             "name": self.name,
+            "avatar": self.avatar,
             "mood": self.mood,
             "mood_label": self.mood_label,
             "current_plan": self.current_plan,
