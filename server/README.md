@@ -168,17 +168,23 @@ Unity просто интерполирует
 
 #### Конфигурация (env)
 
-LLM_PROVIDER=openai|gemini|yandex|bothub|openrouter
-
-LLM_API_KEY=...
-
-VECTOR_DB_URL=...
-
-DATABASE_URL=...
+При запуске сервера автоматически читается `.env` из корня репозитория
+(`skebobia/.env`). Уже заданные переменные окружения не перезаписываются.
 
 TICK_INTERVAL_SEC=2
+RELATIONS_INTERVAL_TICKS=5
 
-DEFAULT_SPEED=1.0
+# LLM-decider (строгий JSON + fallback на rule-based при любой ошибке)
+LLM_DECIDER_ENABLED=0
+LLM_DECIDER_BASE_URL=https://bothub.chat/api/v2/openai/v1
+LLM_DECIDER_MODEL=
+LLM_DECIDER_API_KEY=
+LLM_DECIDER_TIMEOUT_SEC=30
+LLM_DECIDER_TEMPERATURE=0.2
+LLM_DECIDER_MAX_OUTPUT_TOKENS=350
+LLM_DECIDER_MAX_RETRIES=0
+LLM_DECIDER_MAX_AGENTS_PER_TICK=3
+LLM_DECIDER_DEBUG=0
 
 #### Запуск
 

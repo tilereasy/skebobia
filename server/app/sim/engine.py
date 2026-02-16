@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Deque
+from typing import Any, Deque
 
 from app.agents.agent import AgentState, Vec3, plan_for_mood
 from app.sim import templates
+from app.sim.llm_decider import AgentDecision, LLMTickDecider
 from app.sim.movement import SAFE_POINT, pick_wander_target, step_towards
 from app.sim.relations import apply_ignored_inbox_penalty, clamp as clamp_relation, update_relations_from_event
 from app.sim.rules import (
@@ -72,6 +73,10 @@ class StubWorld:
             relations=relations,
             event_log=deque(maxlen=history_limit),
         )
+        self.llm_decider = LLMTickDecider.from_env()
+        self.prompt_recent_events_limit = 5
+        self.prompt_inbox_limit = 3
+        self.prompt_memories_limit = 3
         self._seed_initial_events()
 
     @property
@@ -90,6 +95,113 @@ class StubWorld:
             return None
         agent = self.state.agents.get(agent_id)
         return agent.name if agent else None
+
+    def _distance_2d(self, lhs: Vec3, rhs: Vec3) -> float:
+        dx = lhs.x - rhs.x
+        dz = lhs.z - rhs.z
+        return (dx * dx + dz * dz) ** 0.5
+
+    def _event_prompt_item(self, event: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": event.get("id"),
+            "source_id": event.get("source_id"),
+            "target_id": event.get("target_id"),
+            "text": str(event.get("text", ""))[:160],
+            "tags": list(event.get("tags", []))[:4],
+        }
+
+    def _fake_memories(self, agent_id: str, limit: int) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for event in reversed(self.state.event_log):
+            if event.get("source_id") != agent_id and event.get("target_id") != agent_id:
+                continue
+            items.append(
+                {
+                    "event_id": event.get("id"),
+                    "text": str(event.get("text", ""))[:140],
+                    "tags": list(event.get("tags", []))[:3],
+                }
+            )
+            if len(items) >= limit:
+                break
+        items.reverse()
+        return items
+
+    def _agent_context_for_prompt(self, agent: AgentState) -> dict[str, Any]:
+        inbox_items = [
+            {
+                "source_id": message.get("source_id"),
+                "source_type": message.get("source_type"),
+                "text": str(message.get("text", ""))[:140],
+                "tags": list(message.get("tags", []))[:3],
+            }
+            for message in agent.inbox[-self.prompt_inbox_limit :]
+        ]
+
+        others: list[dict[str, Any]] = []
+        for other in self._ordered_agents():
+            if other.id == agent.id:
+                continue
+            others.append(
+                {
+                    "id": other.id,
+                    "name": other.name,
+                    "distance": round(self._distance_2d(agent.pos, other.pos), 2),
+                    "relation": self.state.relations.get((agent.id, other.id), 0),
+                }
+            )
+        others.sort(key=lambda item: item["distance"])
+
+        return {
+            "agent_id": agent.id,
+            "state": {
+                "mood": agent.mood,
+                "mood_label": agent.mood_label,
+                "plan": agent.current_plan,
+                "pos": {"x": round(agent.pos.x, 2), "z": round(agent.pos.z, 2)},
+            },
+            "recent_events": [
+                self._event_prompt_item(event)
+                for event in list(self.state.event_log)[-self.prompt_recent_events_limit :]
+            ],
+            "inbox": inbox_items,
+            "memories_top": self._fake_memories(agent.id, self.prompt_memories_limit),
+            "others": others,
+        }
+
+    def _world_summary_for_prompt(self) -> dict[str, Any]:
+        return {
+            "tick": self.state.tick,
+            "agents_count": len(self.state.agents),
+            "recent_events": [
+                self._event_prompt_item(event)
+                for event in list(self.state.event_log)[-self.prompt_recent_events_limit :]
+            ],
+        }
+
+    def _llm_agent_batch_ids(self) -> list[str]:
+        if not self.llm_decider.enabled:
+            return []
+
+        ordered = sorted(self.state.agents.keys())
+        if not ordered:
+            return []
+        count = min(self.llm_decider.max_agents_per_tick, len(ordered))
+        start_idx = (self.state.tick - 1) % len(ordered)
+        return [ordered[(start_idx + idx) % len(ordered)] for idx in range(count)]
+
+    def _llm_decisions_for_tick(self) -> dict[str, AgentDecision]:
+        agent_ids = self._llm_agent_batch_ids()
+        if not agent_ids:
+            return {}
+
+        contexts = [self._agent_context_for_prompt(self.state.agents[agent_id]) for agent_id in agent_ids]
+        return self.llm_decider.decide(
+            tick=self.state.tick,
+            world_summary=self._world_summary_for_prompt(),
+            agents_context=contexts,
+            expected_agent_ids=agent_ids,
+        )
 
     def _build_agents(self) -> dict[str, AgentState]:
         base = [
@@ -304,6 +416,105 @@ class StubWorld:
         agent.target_id = None
         return None
 
+    def _intent_from_llm_decision(self, agent: AgentState, decision: AgentDecision) -> ActionIntent | None:
+        if decision.act == "idle":
+            return ActionIntent(kind="idle")
+
+        if decision.act == "move":
+            target_id: str | None = None
+            if (
+                decision.target_id
+                and decision.target_id in self.state.agents
+                and decision.target_id != agent.id
+            ):
+                target_id = decision.target_id
+
+            destination = None
+            if decision.move_to is not None:
+                destination = Vec3(x=decision.move_to.x, z=decision.move_to.z)
+            if target_id is None and destination is None:
+                destination = pick_wander_target(agent.id, self.state.tick)
+
+            return ActionIntent(kind="move", target_id=target_id, destination=destination)
+
+        if decision.act == "say":
+            if agent.say_cooldown > 0:
+                return None
+            text = (decision.say_text or "").strip()
+            if not text:
+                return None
+
+            target_id: str | None = None
+            if (
+                decision.target_id
+                and decision.target_id in self.state.agents
+                and decision.target_id != agent.id
+            ):
+                target_id = decision.target_id
+
+            return ActionIntent(
+                kind="say",
+                text=text,
+                tags=["dialogue", "llm"],
+                target_id=target_id,
+            )
+
+        if decision.act == "message":
+            if agent.message_cooldown > 0:
+                return None
+            target_id = decision.target_id
+            text = (decision.say_text or "").strip()
+            if (
+                not target_id
+                or target_id not in self.state.agents
+                or target_id == agent.id
+                or not text
+            ):
+                return None
+            return ActionIntent(
+                kind="message",
+                text=text,
+                tags=["agent_message", "dialogue", "llm"],
+                target_id=target_id,
+            )
+
+        return None
+
+    def _apply_llm_deltas(self, agent: AgentState, decision: AgentDecision) -> bool:
+        if not decision.deltas:
+            return False
+
+        # LLM may only suggest tiny shifts; server clips harder before applying.
+        mood_delta = _clamp_int(decision.deltas.self_mood, -6, 6)
+        if mood_delta != 0:
+            agent.mood = _clamp_int(agent.mood + mood_delta, -100, 100)
+
+        relations_changed = False
+        for rel_delta in decision.deltas.relations[:3]:
+            if rel_delta.to_id == agent.id or rel_delta.to_id not in self.state.agents:
+                continue
+            key = (agent.id, rel_delta.to_id)
+            if key not in self.state.relations:
+                continue
+            delta = _clamp_int(rel_delta.delta, -3, 3)
+            if delta == 0:
+                continue
+            self.state.relations[key] = clamp_relation(self.state.relations[key] + delta)
+            relations_changed = True
+        return relations_changed
+
+    def _should_consume_inbox(self, context, intent: ActionIntent) -> bool:
+        if not context.direct_messages:
+            return False
+        if intent.kind not in {"say", "message"}:
+            return False
+
+        latest_message = context.direct_messages[-1]
+        source_id = latest_message.get("source_id")
+        if intent.kind == "message" and source_id and intent.target_id and intent.target_id != source_id:
+            return False
+        return True
+
     def _step_relations(self) -> None:
         for src_id, src_agent in self.state.agents.items():
             for dst_id, dst_agent in self.state.agents.items():
@@ -316,7 +527,11 @@ class StubWorld:
                 decay_to_center = -1 if current > 0 else (1 if current < 0 else 0)
                 self.state.relations[key] = clamp_relation(current + mood_alignment + plan_alignment + decay_to_center)
 
-    def _run_agent_brain(self, agent: AgentState) -> list[dict]:
+    def _run_agent_brain(
+        self,
+        agent: AgentState,
+        llm_decision: AgentDecision | None = None,
+    ) -> tuple[list[dict], bool]:
         apply_ignored_inbox_penalty(
             relations=self.state.relations,
             inbox=agent.inbox,
@@ -338,21 +553,37 @@ class StubWorld:
         if context.mood_shift != 0:
             agent.mood = _clamp_int(agent.mood + context.mood_shift, -100, 100)
 
-        goal = choose_goal(agent=agent, context=context, traits=traits)
-        plan_target_id = context.target_id if goal in {GOAL_RESPOND, GOAL_HELP} else context.best_friend_id
-        agent.current_plan = goal_to_plan(goal, target_name=self._agent_name(plan_target_id))
-        agent.target_id = plan_target_id
+        fallback_goal = choose_goal(agent=agent, context=context, traits=traits)
+        fallback_target_id = (
+            context.target_id if fallback_goal in {GOAL_RESPOND, GOAL_HELP} else context.best_friend_id
+        )
+        fallback_intent = self._goal_to_intent(agent, fallback_goal, context, traits)
 
-        intent = self._goal_to_intent(agent, goal, context, traits)
+        goal = fallback_goal
+        intent = fallback_intent
+        agent.current_plan = goal_to_plan(fallback_goal, target_name=self._agent_name(fallback_target_id))
+        agent.target_id = fallback_target_id
+        used_llm = False
+
+        if llm_decision is not None:
+            llm_intent = self._intent_from_llm_decision(agent, llm_decision)
+            if llm_intent is not None:
+                used_llm = True
+                goal = llm_decision.goal.strip() or fallback_goal
+                intent = llm_intent
+                agent.current_plan = goal
+                agent.target_id = llm_intent.target_id
+
         event = self._execute_intent(agent, intent)
 
         # Message is considered processed only after successful response action.
-        if goal == GOAL_RESPOND and event is not None and agent.inbox:
+        if event is not None and agent.inbox and (goal == GOAL_RESPOND or self._should_consume_inbox(context, intent)):
             processed = agent.inbox.pop(-1)
             agent.last_topic = processed.get("text", "")[:60]
             agent.last_interaction_tick = self.state.tick
 
-        return [event] if event is not None else []
+        llm_relations_changed = used_llm and llm_decision is not None and self._apply_llm_deltas(agent, llm_decision)
+        return ([event] if event is not None else []), llm_relations_changed
 
     def _goal_to_intent(self, agent: AgentState, goal: str, context, traits) -> ActionIntent:
         intent = act(
@@ -405,12 +636,19 @@ class StubWorld:
         self.state.tick += 1
         self._decrement_cooldowns()
 
+        llm_decisions = self._llm_decisions_for_tick()
         events: list[dict] = []
+        llm_relations_changed = False
         for agent in self._ordered_agents():
             self._apply_passive_mood(agent)
-            events.extend(self._run_agent_brain(agent))
+            agent_events, agent_relations_changed = self._run_agent_brain(
+                agent=agent,
+                llm_decision=llm_decisions.get(agent.id),
+            )
+            events.extend(agent_events)
+            llm_relations_changed = llm_relations_changed or agent_relations_changed
 
-        relations_changed = any(event.get("target_id") is not None for event in events)
+        relations_changed = llm_relations_changed or any(event.get("target_id") is not None for event in events)
         relations_changed = relations_changed or (self.state.tick % self.relations_interval_ticks == 0)
         if relations_changed:
             self._step_relations()
