@@ -1,23 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 
-// Конфигурация API
 const API_PROTOCOL = window.location.protocol === "https:" ? "https" : "http";
 const API_HOST = window.location.hostname || "localhost";
 const API_BASE = import.meta.env.VITE_API_BASE || `${API_PROTOCOL}://${API_HOST}:8000`;
 const WS_PROTOCOL = window.location.protocol === "https:" ? "wss" : "ws";
 const WS_HOST = window.location.hostname || "localhost";
-const WS_URL = import.meta.env.VITE_WS_URL || `${WS_PROTOCOL}://${WS_HOST}:8000/ws/stream`;
-
-// Константы
+const WS_URL =
+  import.meta.env.VITE_WS_URL ||
+  `${WS_PROTOCOL}://${WS_HOST}:8000/ws/stream`;
 const MAX_EVENTS = 300;
-const RECONNECT_DELAY = 1500;
-const MIN_GRAPH_WIDTH = 240;
-const MIN_GRAPH_HEIGHT = 200; // Уменьшено с 260
-const RECENT_EVENTS_LIMIT = 10;
-const FEEDBACK_TIMEOUT = 5000;
-const GRAPH_NODE_SIZE = 8;
-const GRAPH_NODE_FONT_SIZE = 12;
 
 function apiPath(path) {
   return `${API_BASE}${path}`;
@@ -45,8 +37,7 @@ async function fetchJson(url, init) {
   if (raw) {
     try {
       data = JSON.parse(raw);
-    } catch (error) {
-      console.error("JSON parse error:", error);
+    } catch {
       data = null;
     }
   }
@@ -100,38 +91,6 @@ function sourceLabel(event, agentById) {
   return "Unknown";
 }
 
-// Определить тип события по тегам или тексту
-function getEventType(event) {
-  if (Array.isArray(event.tags)) {
-    if (event.tags.includes("dialogue")) return "dialogue";
-    if (event.tags.includes("action")) return "action";
-    if (event.tags.includes("system")) return "system";
-  }
-  if (event.source_type === "world") return "world";
-  if (event.text?.includes("said:") || event.text?.includes("сказал:")) return "dialogue";
-  return "other";
-}
-
-// Мemoизированный компонент карточки агента
-const AgentCard = memo(({ agent, onInspect }) => (
-  <article className="agent-card">
-    <div className="agent-card-head">
-      <strong>{agent.name}</strong>
-      <span className={moodClass(agent.mood_label)}>{agent.mood_label}</span>
-    </div>
-    <p>{agent.current_plan || "-"}</p>
-    <button 
-      type="button" 
-      onClick={() => onInspect(agent.id)}
-      aria-label={`Inspect ${agent.name}`}
-    >
-      Inspect
-    </button>
-  </article>
-));
-
-AgentCard.displayName = "AgentCard";
-
 export default function App() {
   const [agents, setAgents] = useState([]);
   const [relations, setRelations] = useState({ nodes: [], edges: [] });
@@ -148,62 +107,31 @@ export default function App() {
   const [messageAgentId, setMessageAgentId] = useState("");
   const [speed, setSpeed] = useState(1);
   const [controlFeedback, setControlFeedback] = useState("");
-  const [isInitialLoading, setIsInitialLoading] = useState(true);
-  
-  // Новые состояния для фильтров событий
-  const [eventFilters, setEventFilters] = useState({
-    dialogue: true,
-    action: true,
-    world: true,
-    system: true,
-    other: true,
-  });
-  
-  // Состояние для сворачивания панелей
-  const [collapsedPanels, setCollapsedPanels] = useState({
-    graph: false,
-    controls: false,
-  });
 
   const feedRef = useRef(null);
   const graphWrapRef = useRef(null);
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const shouldReconnectRef = useRef(true);
-  const [graphSize, setGraphSize] = useState({ 
-    width: MIN_GRAPH_WIDTH, 
-    height: MIN_GRAPH_HEIGHT 
-  });
+  const [graphSize, setGraphSize] = useState({ width: 600, height: 320 });
 
   const agentById = useMemo(() => {
     return new Map(agents.map((agent) => [agent.id, agent]));
   }, [agents]);
 
   const filteredEvents = useMemo(() => {
-    let filtered = events;
-    
-    // Фильтр по агенту
-    if (filterAgentId !== "all") {
-      filtered = filtered.filter((event) => event.source_id === filterAgentId);
+    if (filterAgentId === "all") {
+      return events;
     }
-    
-    // Фильтр по типу события
-    filtered = filtered.filter((event) => {
-      const type = getEventType(event);
-      return eventFilters[type] !== false;
-    });
-    
-    return filtered;
-  }, [events, filterAgentId, eventFilters]);
+    return events.filter((event) => event.source_id === filterAgentId);
+  }, [events, filterAgentId]);
 
   const graphData = useMemo(() => {
     return {
-      nodes: relations.nodes
-        .filter(node => agentById.has(node.id))
-        .map((node) => ({
-          ...node,
-          color: agentById.get(node.id)?.avatar || fallbackNodeColor(node.id),
-        })),
+      nodes: relations.nodes.map((node) => ({
+        ...node,
+        color: agentById.get(node.id)?.avatar || fallbackNodeColor(node.id),
+      })),
       links: relations.edges.map((edge) => ({ ...edge })),
     };
   }, [relations, agentById]);
@@ -214,9 +142,7 @@ export default function App() {
       if (!agent) {
         return null;
       }
-      const recentEvents = events
-        .filter((event) => event.source_id === agentId)
-        .slice(-RECENT_EVENTS_LIMIT);
+      const recentEvents = events.filter((event) => event.source_id === agentId).slice(-10);
       return {
         id: agent.id,
         name: agent.name,
@@ -247,7 +173,6 @@ export default function App() {
         setInspectData(data);
         setInspectError("");
       } catch (error) {
-        console.error("Inspector API error:", error);
         const fallback = buildLocalInspectData(agentId);
         if (fallback) {
           setInspectData(fallback);
@@ -264,29 +189,6 @@ export default function App() {
     [buildLocalInspectData]
   );
 
-  const toggleEventFilter = useCallback((filterType) => {
-    setEventFilters(prev => ({
-      ...prev,
-      [filterType]: !prev[filterType]
-    }));
-  }, []);
-
-  const togglePanel = useCallback((panelName) => {
-    setCollapsedPanels(prev => ({
-      ...prev,
-      [panelName]: !prev[panelName]
-    }));
-  }, []);
-
-  // Автоматическая очистка feedback сообщений
-  useEffect(() => {
-    if (controlFeedback) {
-      const timer = setTimeout(() => setControlFeedback(""), FEEDBACK_TIMEOUT);
-      return () => clearTimeout(timer);
-    }
-  }, [controlFeedback]);
-
-  // Загрузка начального состояния
   useEffect(() => {
     async function loadInitialState() {
       try {
@@ -301,16 +203,12 @@ export default function App() {
           setSpeed(state.speed);
         }
       } catch (error) {
-        console.error("Initial state load failed:", error);
         setControlFeedback(`Initial state load failed: ${String(error)}`);
-      } finally {
-        setIsInitialLoading(false);
       }
     }
     loadInitialState();
   }, []);
 
-  // Установка messageAgentId при загрузке агентов
   useEffect(() => {
     if (agents.length === 0) {
       return;
@@ -320,7 +218,6 @@ export default function App() {
     }
   }, [agents, messageAgentId]);
 
-  // Сброс фильтра если агент удален
   useEffect(() => {
     if (filterAgentId === "all") {
       return;
@@ -330,7 +227,6 @@ export default function App() {
     }
   }, [agents, filterAgentId]);
 
-  // Автоскролл для ленты событий
   useEffect(() => {
     if (!autoScroll || !feedRef.current) {
       return;
@@ -338,7 +234,6 @@ export default function App() {
     feedRef.current.scrollTop = feedRef.current.scrollHeight;
   }, [filteredEvents, autoScroll]);
 
-  // Отслеживание размера графа
   useEffect(() => {
     if (!graphWrapRef.current) {
       return;
@@ -348,13 +243,12 @@ export default function App() {
     const updateSize = () => {
       const rect = target.getBoundingClientRect();
       setGraphSize({
-        width: Math.max(MIN_GRAPH_WIDTH, Math.floor(rect.width)),
-        height: Math.max(MIN_GRAPH_HEIGHT, Math.floor(rect.height)),
+        width: Math.max(240, Math.floor(rect.width)),
+        height: Math.max(260, Math.floor(rect.height)),
       });
     };
 
     updateSize();
-    
     if (typeof ResizeObserver === "undefined") {
       window.addEventListener("resize", updateSize);
       return () => window.removeEventListener("resize", updateSize);
@@ -365,7 +259,6 @@ export default function App() {
     return () => observer.disconnect();
   }, []);
 
-  // WebSocket подключение
   useEffect(() => {
     shouldReconnectRef.current = true;
 
@@ -375,19 +268,12 @@ export default function App() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log("WebSocket connected");
         setWsStatus("open");
       };
 
       ws.onmessage = (message) => {
         try {
           const parsed = JSON.parse(message.data);
-          
-          if (!parsed.type || parsed.payload === undefined) {
-            console.warn("Invalid WebSocket message format:", parsed);
-            return;
-          }
-
           if (parsed.type === "agents_state" && Array.isArray(parsed.payload)) {
             setAgents(parsed.payload);
             return;
@@ -398,29 +284,22 @@ export default function App() {
           }
           if (parsed.type === "relations" && parsed.payload) {
             setRelations(parsed.payload);
-            return;
           }
-          if (parsed.type === "ping") {
-            return;
-          }
-        } catch (error) {
-          console.error("WebSocket message parse error:", error);
+        } catch {
           setControlFeedback("WS: received malformed message");
         }
       };
 
-      ws.onerror = (error) => {
-        console.error("WebSocket error:", error);
+      ws.onerror = () => {
         setWsStatus("error");
       };
 
       ws.onclose = () => {
-        console.log("WebSocket closed");
         if (!shouldReconnectRef.current) {
           return;
         }
         setWsStatus("reconnecting");
-        reconnectTimerRef.current = setTimeout(connect, RECONNECT_DELAY);
+        reconnectTimerRef.current = setTimeout(connect, 1500);
       };
     }
 
@@ -449,7 +328,6 @@ export default function App() {
       setWorldEventText("");
       setControlFeedback("World event sent");
     } catch (error) {
-      console.error("Failed to send world event:", error);
       setControlFeedback(`Failed to send world event: ${String(error)}`);
     }
   }
@@ -466,7 +344,6 @@ export default function App() {
       setMessageText("");
       setControlFeedback("Message sent");
     } catch (error) {
-      console.error("Failed to send message:", error);
       setControlFeedback(`Failed to send message: ${String(error)}`);
     }
   }
@@ -480,22 +357,8 @@ export default function App() {
       }
       setControlFeedback(`Speed updated to ${Number(speed).toFixed(1)}x`);
     } catch (error) {
-      console.error("Failed to update speed:", error);
       setControlFeedback(`Failed to update speed: ${String(error)}`);
     }
-  }
-
-  if (isInitialLoading) {
-    return (
-      <div className="app-shell">
-        <header className="topbar">
-          <div>
-            <h1>Skebobia Dashboard</h1>
-            <p>Loading...</p>
-          </div>
-        </header>
-      </div>
-    );
   }
 
   return (
@@ -505,14 +368,7 @@ export default function App() {
           <h1>Skebobia Dashboard</h1>
           <p>Realtime control + telemetry</p>
         </div>
-        <div className="topbar-actions">
-          <a href="/scene/" target="_blank" rel="noopener noreferrer" className="scene-link">
-            🎮 Open Unity Scene
-          </a>
-          <div className={`ws-pill ws-${wsStatus}`} aria-label={`WebSocket status: ${wsStatus}`}>
-            WS: {wsStatus}
-          </div>
-        </div>
+        <div className={`ws-pill ws-${wsStatus}`}>WS: {wsStatus}</div>
       </header>
 
       <main className="dashboard-grid">
@@ -522,11 +378,7 @@ export default function App() {
             <div className="inline-controls">
               <label>
                 Agent:
-                <select 
-                  value={filterAgentId} 
-                  onChange={(event) => setFilterAgentId(event.target.value)}
-                  aria-label="Filter events by agent"
-                >
+                <select value={filterAgentId} onChange={(event) => setFilterAgentId(event.target.value)}>
                   <option value="all">All</option>
                   {agents.map((agent) => (
                     <option key={agent.id} value={agent.id}>
@@ -540,112 +392,61 @@ export default function App() {
                   type="checkbox"
                   checked={autoScroll}
                   onChange={(event) => setAutoScroll(event.target.checked)}
-                  aria-label="Enable auto-scroll"
                 />
                 auto-scroll
               </label>
             </div>
           </div>
 
-          <div className="event-filters">
-            <span className="filter-label">Show:</span>
-            <label className="filter-checkbox">
-              <input
-                type="checkbox"
-                checked={eventFilters.dialogue}
-                onChange={() => toggleEventFilter("dialogue")}
-              />
-              💬 Dialogues
-            </label>
-            <label className="filter-checkbox">
-              <input
-                type="checkbox"
-                checked={eventFilters.action}
-                onChange={() => toggleEventFilter("action")}
-              />
-              ⚡ Actions
-            </label>
-            <label className="filter-checkbox">
-              <input
-                type="checkbox"
-                checked={eventFilters.world}
-                onChange={() => toggleEventFilter("world")}
-              />
-              🌍 World
-            </label>
-            <label className="filter-checkbox">
-              <input
-                type="checkbox"
-                checked={eventFilters.system}
-                onChange={() => toggleEventFilter("system")}
-              />
-              ⚙️ System
-            </label>
-          </div>
-
-          <div className="event-list" ref={feedRef} role="log" aria-live="polite">
-            {filteredEvents.length === 0 && <div className="empty-state">No events match filters</div>}
-            {filteredEvents.map((event) => {
-              const eventType = getEventType(event);
-              return (
-                <article key={event.id} className={`event-item event-type-${eventType}`}>
-                  <div className="event-meta">
-                    <span className="event-time">{event.ts || "-"}</span>
-                    <span className="event-source">{sourceLabel(event, agentById)}</span>
-                    <span className="event-tags">{Array.isArray(event.tags) ? event.tags.join(", ") : ""}</span>
-                  </div>
-                  <p>{event.text}</p>
-                </article>
-              );
-            })}
+          <div className="event-list" ref={feedRef}>
+            {filteredEvents.length === 0 && <div className="empty-state">No events yet</div>}
+            {filteredEvents.map((event) => (
+              <article key={event.id} className="event-item">
+                <div className="event-meta">
+                  <span>{event.ts || "-"}</span>
+                  <span>{sourceLabel(event, agentById)}</span>
+                  <span>{Array.isArray(event.tags) ? event.tags.join(", ") : ""}</span>
+                </div>
+                <p>{event.text}</p>
+              </article>
+            ))}
           </div>
         </section>
 
-        <section className="panel graph-panel-compact">
+        <section className="panel graph-panel">
           <div className="panel-title-row">
             <h2>Relations Graph</h2>
-            <div>
-              <span className="muted">Click node to inspect</span>
-              <button 
-                type="button" 
-                className="collapse-btn"
-                onClick={() => togglePanel("graph")}
-                aria-label={collapsedPanels.graph ? "Expand graph" : "Collapse graph"}
-              >
-                {collapsedPanels.graph ? "▼" : "▲"}
-              </button>
-            </div>
+            <span className="muted">Click node to inspect</span>
           </div>
-          {!collapsedPanels.graph && (
-            <div className="graph-wrap" ref={graphWrapRef}>
-              <ForceGraph2D
-                graphData={graphData}
-                width={graphSize.width}
-                height={graphSize.height}
-                linkSource="from"
-                linkTarget="to"
-                nodeLabel={(node) => node.name}
-                linkLabel={(link) => `value: ${link.value}`}
-                linkColor={(link) => (link.value >= 0 ? "rgba(24, 164, 113, 0.95)" : "rgba(214, 58, 58, 0.95)")}
-                linkWidth={(link) => 2 + Math.abs(link.value || 0) / 18}
-                nodeCanvasObject={(node, ctx, globalScale) => {
-                  const label = node.name || node.id;
-                  const fontSize = GRAPH_NODE_FONT_SIZE / globalScale;
-                  ctx.beginPath();
-                  ctx.arc(node.x, node.y, GRAPH_NODE_SIZE, 0, 2 * Math.PI, false);
-                  ctx.fillStyle = node.color || fallbackNodeColor(node.id);
-                  ctx.fill();
-                  ctx.strokeStyle = "#13213a";
-                  ctx.lineWidth = 1;
-                  ctx.stroke();
-                  ctx.font = `${fontSize}px Trebuchet MS`;
-                  ctx.fillStyle = "#13213a";
-                  ctx.fillText(label, node.x + GRAPH_NODE_SIZE + 2, node.y + GRAPH_NODE_SIZE / 2);
-                }}
-                onNodeClick={(node) => fetchInspect(node.id)}
-              />
-            </div>
-          )}
+          <div className="graph-wrap" ref={graphWrapRef}>
+            <ForceGraph2D
+              graphData={graphData}
+              width={graphSize.width}
+              height={graphSize.height}
+              linkSource="from"
+              linkTarget="to"
+              nodeLabel={(node) => node.name}
+              linkLabel={(link) => `value: ${link.value}`}
+              linkColor={(link) => (link.value >= 0 ? "rgba(24, 164, 113, 0.95)" : "rgba(214, 58, 58, 0.95)")}
+              linkWidth={(link) => 2 + Math.abs(link.value || 0) / 18}
+              nodeCanvasObject={(node, ctx, globalScale) => {
+                const label = node.name || node.id;
+                const size = 8;
+                const fontSize = 12 / globalScale;
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
+                ctx.fillStyle = node.color || fallbackNodeColor(node.id);
+                ctx.fill();
+                ctx.strokeStyle = "#13213a";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.font = `${fontSize}px Trebuchet MS`;
+                ctx.fillStyle = "#13213a";
+                ctx.fillText(label, node.x + size + 2, node.y + size / 2);
+              }}
+              onNodeClick={(node) => fetchInspect(node.id)}
+            />
+          </div>
         </section>
 
         <section className="panel side-panel">
@@ -653,96 +454,72 @@ export default function App() {
             <h2>Agent Cards</h2>
             <div className="agent-cards">
               {agents.map((agent) => (
-                <AgentCard 
-                  key={agent.id} 
-                  agent={agent} 
-                  onInspect={fetchInspect}
-                />
+                <article key={agent.id} className="agent-card">
+                  <div className="agent-card-head">
+                    <strong>{agent.name}</strong>
+                    <span className={moodClass(agent.mood_label)}>{agent.mood_label}</span>
+                  </div>
+                  <p>{agent.current_plan || "-"}</p>
+                  <button type="button" onClick={() => fetchInspect(agent.id)}>
+                    Inspect
+                  </button>
+                </article>
               ))}
             </div>
           </div>
 
           <div className="panel-block">
-            <div className="panel-title-row">
-              <h2>Control Panel</h2>
-              <button 
-                type="button" 
-                className="collapse-btn"
-                onClick={() => togglePanel("controls")}
-                aria-label={collapsedPanels.controls ? "Expand controls" : "Collapse controls"}
-              >
-                {collapsedPanels.controls ? "▼" : "▲"}
-              </button>
-            </div>
+            <h2>Control Panel</h2>
 
-            {!collapsedPanels.controls && (
-              <>
-                <form onSubmit={submitWorldEvent} className="control-form">
-                  <label htmlFor="world-event-text">World event</label>
-                  <textarea
-                    id="world-event-text"
-                    rows={3}
-                    value={worldEventText}
-                    onChange={(event) => setWorldEventText(event.target.value)}
-                    placeholder="Meteor shower started over the market..."
-                    aria-label="World event text"
-                  />
-                  <button type="submit">Send Event</button>
-                </form>
+            <form onSubmit={submitWorldEvent} className="control-form">
+              <label>World event</label>
+              <textarea
+                rows={3}
+                value={worldEventText}
+                onChange={(event) => setWorldEventText(event.target.value)}
+                placeholder="Meteor shower started over the market..."
+              />
+              <button type="submit">Send Event</button>
+            </form>
 
-                <form onSubmit={submitMessage} className="control-form">
-                  <label htmlFor="message-agent">Message to agent</label>
-                  <select 
-                    id="message-agent"
-                    value={messageAgentId} 
-                    onChange={(event) => setMessageAgentId(event.target.value)}
-                    aria-label="Select agent to message"
-                  >
-                    {agents.map((agent) => (
-                      <option key={agent.id} value={agent.id}>
-                        {agent.name}
-                      </option>
-                    ))}
-                  </select>
-                  <textarea
-                    id="message-text"
-                    rows={2}
-                    value={messageText}
-                    onChange={(event) => setMessageText(event.target.value)}
-                    placeholder="You should patrol the square."
-                    aria-label="Message text"
-                  />
-                  <button type="submit">Send Message</button>
-                </form>
+            <form onSubmit={submitMessage} className="control-form">
+              <label>Message to agent</label>
+              <select value={messageAgentId} onChange={(event) => setMessageAgentId(event.target.value)}>
+                {agents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </option>
+                ))}
+              </select>
+              <textarea
+                rows={2}
+                value={messageText}
+                onChange={(event) => setMessageText(event.target.value)}
+                placeholder="You should patrol the square."
+              />
+              <button type="submit">Send Message</button>
+            </form>
 
-                <form onSubmit={submitSpeed} className="control-form">
-                  <label htmlFor="speed-slider">Speed: {Number(speed).toFixed(1)}x</label>
-                  <input
-                    id="speed-slider"
-                    type="range"
-                    min="0.1"
-                    max="5"
-                    step="0.1"
-                    value={speed}
-                    onChange={(event) => setSpeed(Number(event.target.value))}
-                    aria-label="Simulation speed"
-                  />
-                  <button type="submit">Apply Speed</button>
-                </form>
-              </>
-            )}
+            <form onSubmit={submitSpeed} className="control-form">
+              <label>Speed: {Number(speed).toFixed(1)}x</label>
+              <input
+                type="range"
+                min="0.1"
+                max="5"
+                step="0.1"
+                value={speed}
+                onChange={(event) => setSpeed(Number(event.target.value))}
+              />
+              <button type="submit">Apply Speed</button>
+            </form>
 
-            {controlFeedback && (
-              <p className="control-feedback" role="status" aria-live="polite">
-                {controlFeedback}
-              </p>
-            )}
+            {controlFeedback && <p className="control-feedback">{controlFeedback}</p>}
           </div>
         </section>
       </main>
 
       {inspectAgentId && (
-        <aside className="inspect-drawer" role="dialog" aria-label="Agent inspector">
+        <aside className="inspect-drawer">
           <div className="inspect-header">
             <h3>Inspector: {inspectData?.name || inspectAgentId}</h3>
             <button
@@ -752,14 +529,13 @@ export default function App() {
                 setInspectData(null);
                 setInspectError("");
               }}
-              aria-label="Close inspector"
             >
               Close
             </button>
           </div>
 
           {inspectLoading && <p>Loading...</p>}
-          {inspectError && <p className="error-message">{inspectError}</p>}
+          {inspectError && <p>{inspectError}</p>}
           {inspectData && !inspectLoading && (
             <div className="inspect-content">
               <p>
