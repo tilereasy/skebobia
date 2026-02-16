@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -27,11 +28,11 @@ def mood_label(mood: int) -> str:
 
 def plan_for_mood(label: str, selector: int = 0) -> str:
     plans = {
-        "angry": ["пойду охлажу свое трахание", "я уже не скебоб я зверь нахер пойду спать"],
-        "sad": ["пойду поною кому нибудь", "гуляю как дед инсайд"],
-        "neutral": ["гуляю", "ищу подарки"],
-        "happy": ["хочет по доброму поговорить", "приветвтовать соседей"],
-        "excited": ["рассказать всем хорошие новости", "двигается быстро"],
+        "angry": ["Нужно снизить напряжение.", "Сделаю паузу и разберусь спокойно."],
+        "sad": ["Ищу поддержку у союзников.", "Собираюсь с мыслями и наблюдаю."],
+        "neutral": ["Осматриваю окружение.", "Двигаюсь по маршруту наблюдения."],
+        "happy": ["Хочу поделиться хорошими новостями.", "Проверю, как дела у команды."],
+        "excited": ["Готов действовать быстрее обычного.", "Хочу вовлечь других в активность."],
     }
     options = plans.get(label, plans["neutral"])
     return options[abs(int(selector)) % len(options)]
@@ -49,6 +50,13 @@ class AgentState:
     current_plan: str = "наблюдать мир"
     last_action: str = "idle"
     last_say: str = ""
+    inbox: list[dict[str, Any]] = field(default_factory=list)
+    memory_short: list[str] = field(default_factory=list)
+    target_id: str | None = None
+    say_cooldown: int = 0
+    message_cooldown: int = 0
+    last_topic: str = ""
+    last_interaction_tick: int = 0
 
     @property
     def mood_label(self) -> str:
@@ -66,6 +74,7 @@ class AgentState:
             "look_at": self.look_at.to_dict(),
             "last_action": self.last_action,
             "last_say": self.last_say,
+            "target_id": self.target_id,
         }
 
     def to_agent_summary(self) -> dict:
