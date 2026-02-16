@@ -73,8 +73,8 @@ async def tick_loop() -> None:
         result = world.step()
         await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
 
-        if result.event is not None:
-            await hub.broadcast({"type": "event", "payload": result.event})
+        for event in result.events:
+            await hub.broadcast({"type": "event", "payload": event})
         if result.relations_changed:
             await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
 
@@ -131,23 +131,26 @@ async def events(
 
 @app.post("/api/control/event")
 async def control_event(payload: ControlEventIn) -> dict:
-    event = world.add_world_event(payload.text, payload.importance)
+    event, reactions = world.add_world_event(payload.text, payload.importance)
     await hub.broadcast({"type": "event", "payload": event})
+    for reaction in reactions:
+        await hub.broadcast({"type": "event", "payload": reaction})
     await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
     await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
-    return {"event_id": event["id"]}
+    return {"event_id": event["id"], "reaction_event_ids": [reaction["id"] for reaction in reactions]}
 
 
 @app.post("/api/control/message")
 async def control_message(payload: ControlMessageIn) -> dict:
     try:
-        event = world.add_agent_message(payload.agent_id, payload.text)
+        event, reply = world.add_agent_message(payload.agent_id, payload.text)
     except KeyError:
         raise HTTPException(status_code=404, detail="agent not found") from None
     await hub.broadcast({"type": "event", "payload": event})
+    await hub.broadcast({"type": "event", "payload": reply})
     await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
     await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
-    return {"accepted": True}
+    return {"accepted": True, "reply_event_id": reply["id"]}
 
 
 @app.post("/api/control/speed")

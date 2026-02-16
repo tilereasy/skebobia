@@ -6,6 +6,24 @@ from datetime import UTC, datetime
 from typing import Deque
 
 from app.agents.agent import AgentState, Vec3, plan_for_mood
+from app.sim import templates
+from app.sim.movement import SAFE_POINT, pick_wander_target, step_towards
+from app.sim.relations import apply_ignored_inbox_penalty, clamp as clamp_relation, update_relations_from_event
+from app.sim.rules import (
+    GOAL_EXPLORE,
+    GOAL_HELP,
+    GOAL_PANIC,
+    GOAL_RESPOND,
+    GOAL_SOCIAL,
+    ActionIntent,
+    act,
+    choose_goal,
+    goal_to_plan,
+    parse_traits,
+    pick_best_friend,
+    reflect,
+    text_sentiment,
+)
 
 
 def _utc_iso() -> str:
@@ -20,56 +38,10 @@ def _clamp_float(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def _text_hash(text: str) -> int:
-    return sum(ord(char) for char in text.lower())
-
-
-def _sentiment_score(text: str) -> int:
-    positive_tokens = {
-        "help",
-        "gift",
-        "peace",
-        "good",
-        "safe",
-        "celebrate",
-        "спасибо",
-        "помоги",
-        "подар",
-        "мир",
-        "добро",
-        "рад",
-        "поддерж",
-    }
-    negative_tokens = {
-        "attack",
-        "conflict",
-        "fight",
-        "fire",
-        "danger",
-        "hate",
-        "war",
-        "угр",
-        "пожар",
-        "конфликт",
-        "драка",
-        "ненав",
-        "зло",
-        "опас",
-    }
-
-    normalized = text.lower()
-    pos_hits = sum(token in normalized for token in positive_tokens)
-    neg_hits = sum(token in normalized for token in negative_tokens)
-    score = pos_hits - neg_hits
-    if score == 0:
-        score = 1 if _text_hash(normalized) % 2 == 0 else -1
-    return _clamp_int(score, -2, 2)
-
-
 @dataclass
 class TickResult:
-    event: dict | None
-    relations_changed: bool
+    events: list[dict] = field(default_factory=list)
+    relations_changed: bool = False
 
 
 @dataclass
@@ -80,15 +52,21 @@ class WorldState:
     speed: float = 1.0
     tick: int = 0
     next_event_id: int = 0
-    pending_reactions: Deque[dict] = field(default_factory=deque)
-    forced_plan_until_tick: dict[str, int] = field(default_factory=dict)
 
 
 class StubWorld:
-    def __init__(self, relations_interval_ticks: int = 5, history_limit: int = 300):
+    def __init__(
+        self,
+        relations_interval_ticks: int = 5,
+        history_limit: int = 300,
+        memory_short_limit: int = 20,
+        recent_window: int = 20,
+    ):
         agents = self._build_agents()
         relations = self._build_relations(list(agents.keys()))
         self.relations_interval_ticks = max(1, relations_interval_ticks)
+        self.memory_short_limit = max(5, memory_short_limit)
+        self.recent_window = max(10, recent_window)
         self.state = WorldState(
             agents=agents,
             relations=relations,
@@ -107,12 +85,18 @@ class StubWorld:
     def _ordered_agents(self) -> list[AgentState]:
         return [self.state.agents[agent_id] for agent_id in sorted(self.state.agents.keys())]
 
+    def _agent_name(self, agent_id: str | None) -> str | None:
+        if not agent_id:
+            return None
+        agent = self.state.agents.get(agent_id)
+        return agent.name if agent else None
+
     def _build_agents(self) -> dict[str, AgentState]:
         base = [
-            ("a1", "Скебоб", "эмпатичный, любопытный", "#f4a261", -15),
-            ("a2", "Бобекс", "загадочный, безумный", "#2a9d8f", 5),
-            ("a3", "Скебоб Дьявол", "злой, импульсивный", "#e76f51", -5),
-            ("a4", "Скебобиха", "кокетливая, решительная", "#457b9d", 20),
+            ("a1", "Скебоб", "эмпатичный, любопытный", "#f4a261", -10),
+            ("a2", "Бобекс", "загадочный, решительный", "#2a9d8f", 5),
+            ("a3", "Скебоб Дьявол", "злой, импульсивный", "#e76f51", -20),
+            ("a4", "Скебобиха", "кокетливая, заботливая", "#457b9d", 18),
         ]
 
         agents: dict[str, AgentState] = {}
@@ -124,7 +108,9 @@ class StubWorld:
                 mood=mood,
                 avatar=avatar,
                 pos=Vec3(x=-8 + idx * 5, z=-3 + idx),
-                current_plan="Инициализация симуляции",
+                current_plan="Синхронизация мира",
+                last_action="idle",
+                last_interaction_tick=0,
             )
             agent.current_plan = plan_for_mood(agent.mood_label, selector=idx)
             agents[agent_id] = agent
@@ -136,25 +122,38 @@ class StubWorld:
             for dst_idx, dst in enumerate(ids):
                 if src == dst:
                     continue
-                base = 35 - abs(src_idx - dst_idx) * 18 + (dst_idx - src_idx) * 4
-                relations[(src, dst)] = _clamp_int(base, -100, 100)
+                base = 30 - abs(src_idx - dst_idx) * 12 + (dst_idx - src_idx) * 3
+                relations[(src, dst)] = clamp_relation(base)
         return relations
 
     def _seed_initial_events(self) -> None:
         self._append_event(
             source_type="world",
             source_id=None,
-            text="Загрузка мира завершена. Детерминированная симуляция активна.",
-            tags=["system"],
+            text="Загрузка мира завершена. Агентный мозг v0 активен.",
+            tags=["system", "world"],
         )
         self._append_event(
             source_type="world",
             source_id=None,
-            text="Агенты синхронизированы. Любое действие пользователя влияет на состояние мира.",
-            tags=["system"],
+            text="Каждый тик: reflect -> goal -> act. Поведение предсказуемо и наблюдаемо.",
+            tags=["system", "world"],
         )
 
-    def _append_event(self, source_type: str, source_id: str | None, text: str, tags: list[str]) -> dict:
+    def _remember_event(self, event_id: str) -> None:
+        for agent in self.state.agents.values():
+            agent.memory_short.append(event_id)
+            if len(agent.memory_short) > self.memory_short_limit:
+                agent.memory_short.pop(0)
+
+    def _append_event(
+        self,
+        source_type: str,
+        source_id: str | None,
+        text: str,
+        tags: list[str],
+        target_id: str | None = None,
+    ) -> dict:
         self.state.next_event_id += 1
         event = {
             "id": f"e{self.state.next_event_id}",
@@ -164,142 +163,146 @@ class StubWorld:
             "text": text,
             "tags": tags,
         }
+        if target_id is not None:
+            event["target_id"] = target_id
+
         self.state.event_log.append(event)
+        self._remember_event(event["id"])
         return event
 
-    def _set_forced_plan(self, agent_id: str, text: str, ttl_ticks: int) -> None:
-        if agent_id not in self.state.agents:
+    def _enqueue_inbox(
+        self,
+        target_id: str,
+        source_type: str,
+        source_id: str | None,
+        text: str,
+        tags: list[str],
+    ) -> None:
+        target = self.state.agents.get(target_id)
+        if not target:
             return
-        self.state.agents[agent_id].current_plan = text
-        self.state.forced_plan_until_tick[agent_id] = self.state.tick + max(1, ttl_ticks)
-
-    def _apply_world_influence(self, text: str, importance: float | None) -> None:
-        score = _sentiment_score(text)
-        intensity = max(4, int(round((importance if importance is not None else 0.5) * 20)))
-        mood_delta = score * max(3, intensity // 3)
-        relation_delta = score * max(2, intensity // 4)
-
-        for idx, agent in enumerate(self._ordered_agents()):
-            spread = idx if mood_delta < 0 else -idx
-            agent.mood = _clamp_int(agent.mood + mood_delta + spread, -100, 100)
-            self._set_forced_plan(agent.id, f"реагирует на событие: {text[:42]}", ttl_ticks=3)
-
-        for edge_key, edge_value in list(self.state.relations.items()):
-            self.state.relations[edge_key] = _clamp_int(edge_value + relation_delta, -100, 100)
-
-        self.state.pending_reactions.append(
+        target.inbox.append(
             {
-                "kind": "world_event",
+                "source_type": source_type,
+                "source_id": source_id,
                 "text": text,
-                "score": score,
+                "tags": list(tags),
+                "received_tick": self.state.tick,
+                "penalized": False,
             }
         )
 
-    def _apply_message_influence(self, agent_id: str, text: str) -> None:
-        score = _sentiment_score(text)
-        focus_delta = score * 12
-        crowd_delta = score * 2
-        relation_delta = score * 7
-
-        target = self.state.agents[agent_id]
-        target.mood = _clamp_int(target.mood + focus_delta, -100, 100)
-        target.last_action = "listen"
-        self._set_forced_plan(target.id, f"обрабатывает сообщение: {text[:42]}", ttl_ticks=3)
-
+    def _decrement_cooldowns(self) -> None:
         for agent in self._ordered_agents():
-            if agent.id == agent_id:
-                continue
-            agent.mood = _clamp_int(agent.mood + crowd_delta, -100, 100)
-            forward = (agent_id, agent.id)
-            backward = (agent.id, agent_id)
-            self.state.relations[forward] = _clamp_int(self.state.relations[forward] + relation_delta, -100, 100)
-            self.state.relations[backward] = _clamp_int(
-                self.state.relations[backward] + relation_delta // 2,
-                -100,
-                100,
-            )
+            agent.say_cooldown = max(0, agent.say_cooldown - 1)
+            agent.message_cooldown = max(0, agent.message_cooldown - 1)
 
-        self.state.pending_reactions.append(
-            {
-                "kind": "message",
-                "agent_id": agent_id,
-                "text": text,
-                "score": score,
-            }
-        )
+    def _apply_passive_mood(self, agent: AgentState) -> None:
+        if not agent.inbox and (self.state.tick - agent.last_interaction_tick) >= 4:
+            agent.mood = _clamp_int(agent.mood - 1, -100, 100)
+        if self.state.tick % 8 == 0:
+            if agent.mood > 0:
+                agent.mood -= 1
+            elif agent.mood < 0:
+                agent.mood += 1
 
-    def _step_agents(self) -> None:
-        dx_pattern = (-0.4, -0.2, 0.0, 0.2, 0.4, 0.0)
-        dz_pattern = (0.3, 0.1, -0.1, -0.3, 0.0, 0.2)
-        mood_pattern = (-1, 0, 1, 0, 0)
-
-        for idx, agent in enumerate(self._ordered_agents()):
-            phase = self.state.tick + idx * 2
-            dx = dx_pattern[phase % len(dx_pattern)] * max(0.4, self.state.speed)
-            dz = dz_pattern[(phase + idx) % len(dz_pattern)] * max(0.4, self.state.speed)
-
-            agent.pos.x = _clamp_float(agent.pos.x + dx, -20.0, 20.0)
-            agent.pos.z = _clamp_float(agent.pos.z + dz, -20.0, 20.0)
-            agent.look_at = Vec3(dx, 0.0, dz if abs(dz) > 1e-6 else 1.0)
-            agent.mood = _clamp_int(agent.mood + mood_pattern[(phase + idx) % len(mood_pattern)], -100, 100)
-
-            forced_until = self.state.forced_plan_until_tick.get(agent.id, -1)
-            if self.state.tick >= forced_until:
-                agent.current_plan = plan_for_mood(agent.mood_label, selector=self.state.tick + idx)
-
-            if agent.last_action in {"say", "listen"}:
-                agent.last_action = "walk"
-            elif agent.last_action != "walk":
-                agent.last_action = "walk"
-
-    def _reaction_event(self) -> dict | None:
-        if not self.state.pending_reactions:
-            return None
-
-        reaction = self.state.pending_reactions.popleft()
-        ordered_agents = self._ordered_agents()
-        if not ordered_agents:
-            return None
-
-        if reaction["kind"] == "message":
-            speaker = self.state.agents[reaction["agent_id"]]
-            tone = "принял" if reaction["score"] > 0 else "напрягся"
-            text = f'{speaker.name}: "{tone}: {reaction["text"][:60]}"'
-            tags = ["dialogue", "reaction", "message"]
+    def _execute_move(self, agent: AgentState, intent: ActionIntent) -> None:
+        if intent.target_id and intent.target_id in self.state.agents:
+            destination = self.state.agents[intent.target_id].pos
+        elif intent.destination is not None:
+            destination = intent.destination
         else:
-            speaker = ordered_agents[self.state.tick % len(ordered_agents)]
-            tone = "поддерживаю" if reaction["score"] > 0 else "тревожно"
-            text = f'{speaker.name}: "{tone}: {reaction["text"][:60]}"'
-            tags = ["dialogue", "reaction", "world_event"]
+            destination = pick_wander_target(agent.id, self.state.tick)
 
-        speaker.last_action = "say"
-        speaker.last_say = text
-        return self._append_event(source_type="agent", source_id=speaker.id, text=text, tags=tags)
+        old_pos = agent.pos
+        max_step = 0.6 + 0.45 * max(0.5, self.state.speed)
+        new_pos = step_towards(agent.pos, destination, max_step=max_step)
+        agent.pos = new_pos
 
-    def _routine_dialogue_event(self) -> dict | None:
-        if self.state.tick % 3 != 0:
+        dx = new_pos.x - old_pos.x
+        dz = new_pos.z - old_pos.z
+        if abs(dx) > 1e-6 or abs(dz) > 1e-6:
+            agent.look_at = Vec3(dx, 0.0, dz)
+        agent.last_action = "move"
+        agent.target_id = intent.target_id
+
+    def _execute_say(self, agent: AgentState, intent: ActionIntent) -> dict | None:
+        if agent.say_cooldown > 0:
+            agent.last_action = "idle"
             return None
 
-        ordered_agents = self._ordered_agents()
-        if len(ordered_agents) < 2:
-            return None
-
-        speaker = ordered_agents[self.state.tick % len(ordered_agents)]
-        target = ordered_agents[(self.state.tick + 1) % len(ordered_agents)]
-        text = f'{speaker.name}: "План: {speaker.current_plan}. {target.name}, держим курс."'
-        speaker.last_action = "say"
-        speaker.last_say = text
-
-        pair = (speaker.id, target.id)
-        alignment = 1 if (speaker.mood + target.mood) >= 0 else -1
-        self.state.relations[pair] = _clamp_int(self.state.relations[pair] + alignment, -100, 100)
-
-        return self._append_event(
+        text = intent.text.strip() if intent.text else templates.render("explore", self.state.tick)
+        tags = intent.tags if intent.tags else ["dialogue"]
+        event = self._append_event(
             source_type="agent",
-            source_id=speaker.id,
+            source_id=agent.id,
             text=text,
-            tags=["dialogue"],
+            tags=tags,
+            target_id=intent.target_id,
         )
+
+        agent.last_action = "say"
+        agent.last_say = text
+        agent.say_cooldown = 2
+        agent.last_interaction_tick = self.state.tick
+        agent.target_id = intent.target_id
+
+        if intent.target_id:
+            self._enqueue_inbox(
+                target_id=intent.target_id,
+                source_type="agent",
+                source_id=agent.id,
+                text=text,
+                tags=tags,
+            )
+        update_relations_from_event(self.state.relations, event)
+        return event
+
+    def _execute_message(self, agent: AgentState, intent: ActionIntent) -> dict | None:
+        if not intent.target_id or intent.target_id not in self.state.agents:
+            agent.last_action = "idle"
+            return None
+        if agent.message_cooldown > 0:
+            agent.last_action = "idle"
+            return None
+
+        text = intent.text.strip() if intent.text else templates.render("agent_message", self.state.tick, target=intent.target_id)
+        tags = intent.tags if intent.tags else ["agent_message", "dialogue"]
+        event = self._append_event(
+            source_type="agent",
+            source_id=agent.id,
+            text=text,
+            tags=tags,
+            target_id=intent.target_id,
+        )
+        self._enqueue_inbox(
+            target_id=intent.target_id,
+            source_type="agent",
+            source_id=agent.id,
+            text=text,
+            tags=tags,
+        )
+
+        agent.last_action = "say"
+        agent.last_say = text
+        agent.target_id = intent.target_id
+        agent.say_cooldown = max(agent.say_cooldown, 1)
+        agent.message_cooldown = 3
+        agent.last_interaction_tick = self.state.tick
+        update_relations_from_event(self.state.relations, event)
+        return event
+
+    def _execute_intent(self, agent: AgentState, intent: ActionIntent) -> dict | None:
+        if intent.kind == "move":
+            self._execute_move(agent, intent)
+            return None
+        if intent.kind == "say":
+            return self._execute_say(agent, intent)
+        if intent.kind == "message":
+            return self._execute_message(agent, intent)
+        agent.last_action = "idle"
+        agent.target_id = None
+        return None
 
     def _step_relations(self) -> None:
         for src_id, src_agent in self.state.agents.items():
@@ -310,21 +313,109 @@ class StubWorld:
                 current = self.state.relations[key]
                 mood_alignment = 1 if (src_agent.mood + dst_agent.mood) >= 0 else -1
                 plan_alignment = 1 if src_agent.current_plan[:12] == dst_agent.current_plan[:12] else 0
-                self.state.relations[key] = _clamp_int(current + mood_alignment + plan_alignment, -100, 100)
+                decay_to_center = -1 if current > 0 else (1 if current < 0 else 0)
+                self.state.relations[key] = clamp_relation(current + mood_alignment + plan_alignment + decay_to_center)
+
+    def _run_agent_brain(self, agent: AgentState) -> list[dict]:
+        apply_ignored_inbox_penalty(
+            relations=self.state.relations,
+            inbox=agent.inbox,
+            owner_agent_id=agent.id,
+            now_tick=self.state.tick,
+        )
+
+        recent_events = list(self.state.event_log)[-self.recent_window :]
+        all_agent_ids = sorted(self.state.agents.keys())
+        traits = parse_traits(agent.traits)
+        context = reflect(
+            agent=agent,
+            tick=self.state.tick,
+            recent_events=recent_events,
+            relations=self.state.relations,
+            all_agent_ids=all_agent_ids,
+        )
+
+        if context.mood_shift != 0:
+            agent.mood = _clamp_int(agent.mood + context.mood_shift, -100, 100)
+
+        goal = choose_goal(agent=agent, context=context, traits=traits)
+        plan_target_id = context.target_id if goal in {GOAL_RESPOND, GOAL_HELP} else context.best_friend_id
+        agent.current_plan = goal_to_plan(goal, target_name=self._agent_name(plan_target_id))
+        agent.target_id = plan_target_id
+
+        intent = self._goal_to_intent(agent, goal, context, traits)
+        event = self._execute_intent(agent, intent)
+
+        # Message is considered processed only after successful response action.
+        if goal == GOAL_RESPOND and event is not None and agent.inbox:
+            processed = agent.inbox.pop(-1)
+            agent.last_topic = processed.get("text", "")[:60]
+            agent.last_interaction_tick = self.state.tick
+
+        return [event] if event is not None else []
+
+    def _goal_to_intent(self, agent: AgentState, goal: str, context, traits) -> ActionIntent:
+        intent = act(
+            agent=agent,
+            goal=goal,
+            context=context,
+            traits=traits,
+            tick=self.state.tick,
+        )
+        # Panic goal prefers moving to safe center when no explicit destination.
+        if goal == GOAL_PANIC and intent.kind == "move" and intent.destination is None:
+            intent.destination = SAFE_POINT
+        return intent
+
+    def _immediate_world_reactions(self, text: str, sentiment: int, count: int) -> list[dict]:
+        reactions: list[dict] = []
+        ordered_agents = self._ordered_agents()
+        if not ordered_agents:
+            return reactions
+
+        seed = sum(ord(ch) for ch in text) + self.state.tick
+        for idx in range(count):
+            speaker = ordered_agents[(seed + idx) % len(ordered_agents)]
+            friend_id = pick_best_friend(self.state.relations, speaker.id, sorted(self.state.agents.keys()))
+            selector = seed + idx
+
+            if sentiment < 0 and parse_traits(speaker.traits).courage < 55:
+                text_line = templates.render("panic", selector)
+                tags = ["dialogue", "world", "conflict"]
+            else:
+                text_line = templates.render("support", selector)
+                tags = ["dialogue", "world", "help"]
+
+            event = self._append_event(
+                source_type="agent",
+                source_id=speaker.id,
+                text=text_line,
+                tags=tags,
+                target_id=friend_id,
+            )
+            speaker.last_action = "say"
+            speaker.last_say = text_line
+            speaker.say_cooldown = 2
+            speaker.last_interaction_tick = self.state.tick
+            update_relations_from_event(self.state.relations, event)
+            reactions.append(event)
+        return reactions
 
     def step(self) -> TickResult:
         self.state.tick += 1
-        self._step_agents()
+        self._decrement_cooldowns()
 
-        event = self._reaction_event()
-        if event is None:
-            event = self._routine_dialogue_event()
+        events: list[dict] = []
+        for agent in self._ordered_agents():
+            self._apply_passive_mood(agent)
+            events.extend(self._run_agent_brain(agent))
 
-        relations_changed = self.state.tick % self.relations_interval_ticks == 0
+        relations_changed = any(event.get("target_id") is not None for event in events)
+        relations_changed = relations_changed or (self.state.tick % self.relations_interval_ticks == 0)
         if relations_changed:
             self._step_relations()
 
-        return TickResult(event=event, relations_changed=relations_changed)
+        return TickResult(events=events, relations_changed=relations_changed)
 
     def agents_state_payload(self) -> list[dict]:
         return [agent.to_state_payload() for agent in self._ordered_agents()]
@@ -360,24 +451,82 @@ class StubWorld:
         self.state.speed = _clamp_float(speed, 0.1, 5.0)
         return self.state.speed
 
-    def add_world_event(self, text: str, importance: float | None = None) -> dict:
-        tags = ["world_event"]
+    def add_world_event(self, text: str, importance: float | None = None) -> tuple[dict, list[dict]]:
+        tags = ["world"]
         if importance is not None and importance >= 0.7:
             tags.append("important")
 
         event = self._append_event(source_type="world", source_id=None, text=text, tags=tags)
-        self._apply_world_influence(text=text, importance=importance)
-        return event
+        sentiment = text_sentiment(text)
+        intensity = max(1, int(round((importance if importance is not None else 0.5) * 10)))
+        mood_shift = sentiment * max(2, intensity // 2)
 
-    def add_agent_message(self, agent_id: str, text: str) -> dict:
+        for idx, agent in enumerate(self._ordered_agents()):
+            spread = idx if mood_shift < 0 else -idx
+            agent.mood = _clamp_int(agent.mood + mood_shift + spread, -100, 100)
+            if sentiment < 0 and parse_traits(agent.traits).courage < 55:
+                agent.current_plan = goal_to_plan(GOAL_PANIC)
+            elif sentiment < 0:
+                agent.current_plan = goal_to_plan(GOAL_HELP)
+            elif sentiment > 0:
+                agent.current_plan = goal_to_plan(GOAL_SOCIAL)
+            else:
+                agent.current_plan = goal_to_plan(GOAL_EXPLORE)
+            agent.last_topic = text[:60]
+
+        reaction_count = 2 if (importance is not None and importance >= 0.8) else 1 + (sum(ord(ch) for ch in text) % 2)
+        reaction_count = _clamp_int(reaction_count, 1, 2)
+        reactions = self._immediate_world_reactions(text=text, sentiment=sentiment, count=reaction_count)
+        return event, reactions
+
+    def add_agent_message(self, agent_id: str, text: str) -> tuple[dict, dict]:
         if agent_id not in self.state.agents:
             raise KeyError(agent_id)
 
-        agent = self.state.agents[agent_id]
-        message = f"User -> {agent.name}: {text}"
-        event = self._append_event(source_type="world", source_id=None, text=message, tags=["message"])
-        self._apply_message_influence(agent_id=agent_id, text=text)
-        return event
+        target = self.state.agents[agent_id]
+        event = self._append_event(
+            source_type="world",
+            source_id=None,
+            text=f"User -> {target.name}: {text}",
+            tags=["user_message", "dialogue"],
+            target_id=agent_id,
+        )
+        self._enqueue_inbox(
+            target_id=agent_id,
+            source_type="world",
+            source_id=None,
+            text=text,
+            tags=["user_message", "dialogue"],
+        )
+
+        sentiment = text_sentiment(text)
+        target.mood = _clamp_int(target.mood + sentiment * 8, -100, 100)
+        target.current_plan = goal_to_plan(GOAL_RESPOND, target_name="user")
+        target.target_id = None
+        target.last_topic = text[:60]
+
+        selector = self.state.tick + self.state.next_event_id
+        if sentiment < 0 and parse_traits(target.traits).aggression > 60:
+            reply_text = templates.render("conflict", selector)
+            reply_tags = ["dialogue", "reply", "user_message", "conflict"]
+        else:
+            reply_text = templates.render("respond_user", selector)
+            reply_tags = ["dialogue", "reply", "user_message"]
+
+        reply = self._append_event(
+            source_type="agent",
+            source_id=target.id,
+            text=reply_text,
+            tags=reply_tags,
+        )
+
+        target.last_action = "say"
+        target.last_say = reply_text
+        target.say_cooldown = 2
+        target.last_interaction_tick = self.state.tick
+        if target.inbox:
+            target.inbox.pop(-1)
+        return event, reply
 
     def agent_details(self, agent_id: str) -> dict | None:
         agent = self.state.agents.get(agent_id)
@@ -390,9 +539,17 @@ class StubWorld:
             "mood": agent.mood,
             "mood_label": agent.mood_label,
             "current_plan": agent.current_plan,
+            "target_id": agent.target_id,
+            "cooldowns": {
+                "say_cooldown": agent.say_cooldown,
+                "message_cooldown": agent.message_cooldown,
+            },
+            "inbox_size": len(agent.inbox),
+            "inbox_preview": agent.inbox[-5:],
+            "memory_short": list(agent.memory_short[-10:]),
             "key_memories": [
-                {"text": "день 0 в памяти.", "score": 0.42},
-                {"text": "мир детерминирован и управляем.", "score": 0.37},
+                {"text": "короткая память событий активна.", "score": 0.48},
+                {"text": f"last topic: {agent.last_topic or 'n/a'}", "score": 0.35},
             ],
             "recent_events": self.events_payload(limit=10, agent_id=agent.id),
         }
