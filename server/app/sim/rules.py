@@ -201,10 +201,11 @@ def act(
         latest = context.direct_messages[-1]
         source_id = latest.get("source_id")
         source_type = latest.get("source_type")
+        source_name = latest.get("source_name") or source_id or "друг"
         topic = latest.get("text", "")[:45]
         agent.last_topic = topic
         if source_type == "agent" and source_id and agent.message_cooldown == 0:
-            text = templates.render("agent_message", selector, target=source_id)
+            text = templates.render("agent_message", selector, target_name=source_name, topic=topic)
             return ActionIntent(
                 kind="message",
                 text=text,

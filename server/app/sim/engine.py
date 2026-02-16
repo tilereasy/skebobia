@@ -293,10 +293,12 @@ class StubWorld:
         target = self.state.agents.get(target_id)
         if not target:
             return
+        source_name = self._agent_name(source_id) if source_id else None
         target.inbox.append(
             {
                 "source_type": source_type,
                 "source_id": source_id,
+                "source_name": source_name,
                 "text": text,
                 "tags": list(tags),
                 "received_tick": self.state.tick,
@@ -378,7 +380,17 @@ class StubWorld:
             agent.last_action = "idle"
             return None
 
-        text = intent.text.strip() if intent.text else templates.render("agent_message", self.state.tick, target=intent.target_id)
+        target_name = self._agent_name(intent.target_id) or intent.target_id
+        text = (
+            intent.text.strip()
+            if intent.text
+            else templates.render(
+                "agent_message",
+                self.state.tick,
+                target_name=target_name,
+                topic=agent.last_topic or "текущей ситуации",
+            )
+        )
         tags = intent.tags if intent.tags else ["agent_message", "dialogue"]
         event = self._append_event(
             source_type="agent",
