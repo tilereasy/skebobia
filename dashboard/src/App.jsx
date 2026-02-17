@@ -445,73 +445,73 @@ const STYLES = `
     color: var(--text-muted); border: 1px solid var(--border-dim);
   }
 
-.mood {
-  font-family: var(--font-display);
-  font-size: 8px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: 2px;
-  color: var(--text-muted);
-  border: 1px solid var(--border-dim);
-}
+  .mood {
+    font-family: var(--font-display);
+    font-size: 8px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 2px;
+    color: var(--text-muted);
+    border: 1px solid var(--border-dim);
+  }
 
-.mood-happy {
-  color: #00ff9d;
-  border-color: rgba(0,255,157,0.5);
-  background: rgba(0,255,157,0.08);
-  text-shadow: 0 0 8px rgba(0,255,157,0.7);
-}
+  .mood-happy {
+    color: #00ff9d;
+    border-color: rgba(0,255,157,0.5);
+    background: rgba(0,255,157,0.08);
+    text-shadow: 0 0 8px rgba(0,255,157,0.7);
+  }
 
-.mood-excited {
-  color: #ffe066;
-  border-color: rgba(255,224,102,0.5);
-  background: rgba(255,224,102,0.08);
-  text-shadow: 0 0 8px rgba(255,224,102,0.7);
-}
+  .mood-excited {
+    color: #ffe066;
+    border-color: rgba(255,224,102,0.5);
+    background: rgba(255,224,102,0.08);
+    text-shadow: 0 0 8px rgba(255,224,102,0.7);
+  }
 
-.mood-neutral {
-  color: #00dcff;
-  border-color: rgba(0,220,255,0.4);
-  background: rgba(0,220,255,0.06);
-  text-shadow: 0 0 8px rgba(0,220,255,0.5);
-}
+  .mood-neutral {
+    color: #00dcff;
+    border-color: rgba(0,220,255,0.4);
+    background: rgba(0,220,255,0.06);
+    text-shadow: 0 0 8px rgba(0,220,255,0.5);
+  }
 
-.mood-calm {
-  color: #7ecfff;
-  border-color: rgba(126,207,255,0.4);
-  background: rgba(126,207,255,0.06);
-  text-shadow: 0 0 8px rgba(126,207,255,0.5);
-}
+  .mood-calm {
+    color: #7ecfff;
+    border-color: rgba(126,207,255,0.4);
+    background: rgba(126,207,255,0.06);
+    text-shadow: 0 0 8px rgba(126,207,255,0.5);
+  }
 
-.mood-sad {
-  color: #7b9fff;
-  border-color: rgba(123,159,255,0.4);
-  background: rgba(123,159,255,0.06);
-  text-shadow: 0 0 8px rgba(123,159,255,0.5);
-}
+  .mood-sad {
+    color: #7b9fff;
+    border-color: rgba(123,159,255,0.4);
+    background: rgba(123,159,255,0.06);
+    text-shadow: 0 0 8px rgba(123,159,255,0.5);
+  }
 
-.mood-angry {
-  color: #ff3d5a;
-  border-color: rgba(255,61,90,0.5);
-  background: rgba(255,61,90,0.08);
-  text-shadow: 0 0 8px rgba(255,61,90,0.7);
-}
+  .mood-angry {
+    color: #ff3d5a;
+    border-color: rgba(255,61,90,0.5);
+    background: rgba(255,61,90,0.08);
+    text-shadow: 0 0 8px rgba(255,61,90,0.7);
+  }
 
-.mood-anxious {
-  color: #ffb627;
-  border-color: rgba(255,182,39,0.5);
-  background: rgba(255,182,39,0.08);
-  text-shadow: 0 0 8px rgba(255,182,39,0.6);
-}
+  .mood-anxious {
+    color: #ffb627;
+    border-color: rgba(255,182,39,0.5);
+    background: rgba(255,182,39,0.08);
+    text-shadow: 0 0 8px rgba(255,182,39,0.6);
+  }
 
-.mood-afraid {
-  color: #ff7eb3;
-  border-color: rgba(255,126,179,0.4);
-  background: rgba(255,126,179,0.06);
-  text-shadow: 0 0 8px rgba(255,126,179,0.5);
-}
+  .mood-afraid {
+    color: #ff7eb3;
+    border-color: rgba(255,126,179,0.4);
+    background: rgba(255,126,179,0.06);
+    text-shadow: 0 0 8px rgba(255,126,179,0.5);
+  }
 
   /* ── Control Panel ── */
   .control-form {
@@ -953,9 +953,9 @@ export default function App() {
             <div className="event-filters">
               <span className="filter-label">Show:</span>
               {[
-                ["dialogue", "💬 Dialogue"],
-                ["world", "🌍 World"],
-                ["system", "⚙️ System"],
+                ["dialogue", "Dialogue"],
+                ["world", "World"],
+                ["system", "System"],
               ].map(([key, label]) => (
                 <label key={key} className="filter-checkbox">
                   <input type="checkbox" checked={eventFilters[key]} onChange={() => toggleEventFilter(key)} />
