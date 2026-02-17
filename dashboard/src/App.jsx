@@ -165,9 +165,9 @@ const STYLES = `
   }
   @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.2; } }
 
-  .ws-open    { color: var(--green);  border-color: var(--green-dim);  text-shadow: var(--glow-green); }
-  .ws-connecting,.ws-reconnecting { color: var(--amber); border-color: rgba(255,182,39,0.4); text-shadow: var(--glow-amber); }
-  .ws-error   { color: var(--red);    border-color: rgba(255,61,90,0.4); }
+  .ws-open    { color: var(--green);  border-color: var(--green-dim);  text-shadow: var(--glow-green); background-color: rgba(0,255,157,0.04);}
+  .ws-connecting,.ws-reconnecting { color: var(--amber); border-color: rgba(255,182,39,0.4); text-shadow: var(--glow-amber); background-color: rgba(0,255,157,0.04);}
+  .ws-error   { color: var(--red);    border-color: rgba(255,61,90,0.4); background-color: rgba(0,255,157,0.04);}
 
   /* ── Dashboard Grid ── */
   .dashboard-grid {
