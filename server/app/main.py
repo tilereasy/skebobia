@@ -4,12 +4,37 @@ import asyncio
 import contextlib
 import json
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.models import ControlEventIn, ControlMessageIn, ControlSpeedIn
 from app.sim.engine import StubWorld
+
+
+def _load_env_from_repo_root() -> None:
+    # server/app/main.py -> repo root is 2 levels up from "server"
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+
+        value = value.strip()
+        if value and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+_load_env_from_repo_root()
 
 
 class WsHub:
@@ -53,7 +78,7 @@ class WsHub:
 TICK_INTERVAL_SEC = float(os.getenv("TICK_INTERVAL_SEC", "1.0"))
 RELATIONS_INTERVAL_TICKS = int(os.getenv("RELATIONS_INTERVAL_TICKS", "5"))
 
-app = FastAPI(title="Skebobia Day 0 Stub Server", version="0.1.0")
+app = FastAPI(title="Skebobia LLM-first Server", version="0.2.0")
 world = StubWorld(relations_interval_ticks=RELATIONS_INTERVAL_TICKS)
 hub = WsHub()
 
@@ -73,8 +98,8 @@ async def tick_loop() -> None:
         result = world.step()
         await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
 
-        if result.event is not None:
-            await hub.broadcast({"type": "event", "payload": result.event})
+        for event in result.events:
+            await hub.broadcast({"type": "event", "payload": event})
         if result.relations_changed:
             await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
 
@@ -131,23 +156,26 @@ async def events(
 
 @app.post("/api/control/event")
 async def control_event(payload: ControlEventIn) -> dict:
-    event = world.add_world_event(payload.text, payload.importance)
+    event, reactions = world.add_world_event(payload.text, payload.importance)
     await hub.broadcast({"type": "event", "payload": event})
+    for reaction in reactions:
+        await hub.broadcast({"type": "event", "payload": reaction})
     await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
     await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
-    return {"event_id": event["id"]}
+    return {"event_id": event["id"], "reaction_event_ids": [reaction["id"] for reaction in reactions]}
 
 
 @app.post("/api/control/message")
 async def control_message(payload: ControlMessageIn) -> dict:
     try:
-        event = world.add_agent_message(payload.agent_id, payload.text)
+        event, reply = world.add_agent_message(payload.agent_id, payload.text)
     except KeyError:
         raise HTTPException(status_code=404, detail="agent not found") from None
     await hub.broadcast({"type": "event", "payload": event})
+    await hub.broadcast({"type": "event", "payload": reply})
     await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
     await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
-    return {"accepted": True}
+    return {"accepted": True, "reply_event_id": reply["id"]}
 
 
 @app.post("/api/control/speed")
