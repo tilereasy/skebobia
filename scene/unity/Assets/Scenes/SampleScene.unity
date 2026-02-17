@@ -10009,7 +10009,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1036327237}
   - component: {fileID: 1036327236}
-  m_Layer: 0
+  m_Layer: 20
   m_Name: World
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -10028,7 +10028,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 56db8ce88a2a7817cb324a65ca7a4f1e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: '::'
-  speechBubblePrefab: {fileID: 7127713344908872505, guid: a7f3578f1943b7d8d85bda9c79391f43,
+  speechBubblePrefab: {fileID: 7257203723311688180, guid: 81e4902f885a3174986b18a92e2ce396,
     type: 3}
 --- !u!4 &1036327237
 Transform:

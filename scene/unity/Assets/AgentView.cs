@@ -95,7 +95,7 @@ public sealed class AgentView : MonoBehaviour
             bubbleInstance.name = "SpeechBubble";
             bubbleInstance.transform.localPosition = speechBubbleOffset;
             bubbleInstance.transform.localRotation = Quaternion.identity;
-            bubbleInstance.transform.localScale = Vector3.one;
+            bubbleInstance.transform.localScale = Vector3.one * 0.3f;
             bubbleInstance.SetActive(false);
         }
 
