@@ -1,0 +1,806 @@
+fileFormatVersion: 2
+guid: 867b26abebba37b4386efe3d944771b2
+TextureImporter:
+  internalIDToNameTable:
+  - first:
+      213: 6568412859962952655
+    second: straight-train-track-collection_0
+  - first:
+      213: 1570093414777837705
+    second: straight-train-track-collection_1
+  - first:
+      213: -144485725098815434
+    second: straight-train-track-collection_2
+  - first:
+      213: -5256414681538792704
+    second: straight-train-track-collection_3
+  - first:
+      213: 564329096361837941
+    second: straight-train-track-collection_4
+  - first:
+      213: 7344526759158798498
+    second: straight-train-track-collection_5
+  - first:
+      213: -8511640729570472577
+    second: straight-train-track-collection_6
+  - first:
+      213: -8075552021816703771
+    second: straight-train-track-collection_7
+  - first:
+      213: 759945539439933726
+    second: straight-train-track-collection_8
+  - first:
+      213: -4380008593191194884
+    second: straight-train-track-collection_9
+  - first:
+      213: -9044678187103546823
+    second: straight-train-track-collection_10
+  - first:
+      213: 4240081408774253073
+    second: straight-train-track-collection_11
+  - first:
+      213: 8500178648431121192
+    second: straight-train-track-collection_12
+  - first:
+      213: 8290806537881910594
+    second: straight-train-track-collection_13
+  - first:
+      213: 3777758783123798975
+    second: straight-train-track-collection_14
+  - first:
+      213: -3416551378739936530
+    second: straight-train-track-collection_15
+  - first:
+      213: -1783684069203400923
+    second: straight-train-track-collection_16
+  - first:
+      213: -7682787071807760945
+    second: straight-train-track-collection_17
+  - first:
+      213: 2872704877681257734
+    second: straight-train-track-collection_18
+  - first:
+      213: 6673629659396153477
+    second: straight-train-track-collection_19
+  - first:
+      213: -8476018469617103807
+    second: straight-train-track-collection_20
+  - first:
+      213: 1066960551404548673
+    second: straight-train-track-collection_21
+  - first:
+      213: -1065574197641532527
+    second: straight-train-track-collection_22
+  - first:
+      213: 7988240545637081825
+    second: straight-train-track-collection_23
+  - first:
+      213: 6847088951233768667
+    second: straight-train-track-collection_24
+  - first:
+      213: 5541088412247040663
+    second: straight-train-track-collection_25
+  externalObjects: {}
+  serializedVersion: 13
+  mipmaps:
+    mipMapMode: 0
+    enableMipMap: 0
+    sRGBTexture: 1
+    linearTexture: 0
+    fadeOut: 0
+    borderMipMap: 0
+    mipMapsPreserveCoverage: 0
+    alphaTestReferenceValue: 0.5
+    mipMapFadeDistanceStart: 1
+    mipMapFadeDistanceEnd: 3
+  bumpmap:
+    convertToNormalMap: 0
+    externalNormalMap: 0
+    heightScale: 0.25
+    normalMapFilter: 0
+    flipGreenChannel: 0
+  isReadable: 0
+  streamingMipmaps: 0
+  streamingMipmapsPriority: 0
+  vTOnly: 0
+  ignoreMipmapLimit: 0
+  grayScaleToAlpha: 0
+  generateCubemap: 6
+  cubemapConvolution: 0
+  seamlessCubemap: 0
+  textureFormat: 1
+  maxTextureSize: 2048
+  textureSettings:
+    serializedVersion: 2
+    filterMode: 1
+    aniso: 1
+    mipBias: 0
+    wrapU: 1
+    wrapV: 1
+    wrapW: 1
+  nPOTScale: 0
+  lightmap: 0
+  compressionQuality: 50
+  spriteMode: 2
+  spriteExtrude: 1
+  spriteMeshType: 1
+  alignment: 0
+  spritePivot: {x: 0.5, y: 0.5}
+  spritePixelsToUnits: 100
+  spriteBorder: {x: 0, y: 0, z: 0, w: 0}
+  spriteGenerateFallbackPhysicsShape: 1
+  alphaUsage: 1
+  alphaIsTransparency: 1
+  spriteTessellationDetail: -1
+  textureType: 8
+  textureShape: 1
+  singleChannelComponent: 0
+  flipbookRows: 1
+  flipbookColumns: 1
+  maxTextureSizeSet: 0
+  compressionQualitySet: 0
+  textureFormatSet: 0
+  ignorePngGamma: 0
+  applyGammaDecoding: 0
+  swizzle: 50462976
+  cookieLightType: 0
+  platformSettings:
+  - serializedVersion: 4
+    buildTarget: DefaultTexturePlatform
+    maxTextureSize: 2048
+    resizeAlgorithm: 0
+    textureFormat: -1
+    textureCompression: 1
+    compressionQuality: 50
+    crunchedCompression: 0
+    allowsAlphaSplitting: 0
+    overridden: 0
+    ignorePlatformSupport: 0
+    androidETC2FallbackOverride: 0
+    forceMaximumCompressionQuality_BC6H_BC7: 0
+  - serializedVersion: 4
+    buildTarget: Standalone
+    maxTextureSize: 2048
+    resizeAlgorithm: 0
+    textureFormat: -1
+    textureCompression: 1
+    compressionQuality: 50
+    crunchedCompression: 0
+    allowsAlphaSplitting: 0
+    overridden: 0
+    ignorePlatformSupport: 0
+    androidETC2FallbackOverride: 0
+    forceMaximumCompressionQuality_BC6H_BC7: 0
+  - serializedVersion: 4
+    buildTarget: WebGL
+    maxTextureSize: 2048
+    resizeAlgorithm: 0
+    textureFormat: -1
+    textureCompression: 1
+    compressionQuality: 50
+    crunchedCompression: 0
+    allowsAlphaSplitting: 0
+    overridden: 0
+    ignorePlatformSupport: 0
+    androidETC2FallbackOverride: 0
+    forceMaximumCompressionQuality_BC6H_BC7: 0
+  spriteSheet:
+    serializedVersion: 2
+    sprites:
+    - serializedVersion: 2
+      name: straight-train-track-collection_0
+      rect:
+        serializedVersion: 2
+        x: 145
+        y: 1660
+        width: 1722
+        height: 218
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: fcb0338f1b0b72b50800000000000000
+      internalID: 6568412859962952655
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_1
+      rect:
+        serializedVersion: 2
+        x: 145
+        y: 1290
+        width: 1722
+        height: 279
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 988530c54a71ac510800000000000000
+      internalID: 1570093414777837705
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_2
+      rect:
+        serializedVersion: 2
+        x: 145
+        y: 925
+        width: 1722
+        height: 279
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 630de50affeaefdf0800000000000000
+      internalID: -144485725098815434
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_3
+      rect:
+        serializedVersion: 2
+        x: 145
+        y: 554
+        width: 1722
+        height: 287
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 0037bb262b67d07b0800000000000000
+      internalID: -5256414681538792704
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_4
+      rect:
+        serializedVersion: 2
+        x: 145
+        y: 190
+        width: 1722
+        height: 275
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 575801db256e4d700800000000000000
+      internalID: 564329096361837941
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_5
+      rect:
+        serializedVersion: 2
+        x: 699
+        y: 54
+        width: 30
+        height: 39
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 2a8d20bac200de560800000000000000
+      internalID: 7344526759158798498
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_6
+      rect:
+        serializedVersion: 2
+        x: 728
+        y: 54
+        width: 29
+        height: 31
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: f7d84326ad390e980800000000000000
+      internalID: -8511640729570472577
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_7
+      rect:
+        serializedVersion: 2
+        x: 755
+        y: 54
+        width: 25
+        height: 30
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 5e48d66e830edef80800000000000000
+      internalID: -8075552021816703771
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_8
+      rect:
+        serializedVersion: 2
+        x: 780
+        y: 83
+        width: 10
+        height: 10
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: e19b5f6117edb8a00800000000000000
+      internalID: 759945539439933726
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_9
+      rect:
+        serializedVersion: 2
+        x: 780
+        y: 53
+        width: 11
+        height: 31
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: cfe2ea904651733c0800000000000000
+      internalID: -4380008593191194884
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_10
+      rect:
+        serializedVersion: 2
+        x: 790
+        y: 44
+        width: 29
+        height: 40
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 93218fd0c19da7280800000000000000
+      internalID: -9044678187103546823
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_11
+      rect:
+        serializedVersion: 2
+        x: 819
+        y: 54
+        width: 27
+        height: 30
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 11a2abc839bc7da30800000000000000
+      internalID: 4240081408774253073
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_12
+      rect:
+        serializedVersion: 2
+        x: 845
+        y: 54
+        width: 28
+        height: 31
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 823d813e173b6f570800000000000000
+      internalID: 8500178648431121192
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_13
+      rect:
+        serializedVersion: 2
+        x: 872
+        y: 54
+        width: 29
+        height: 39
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 24dffef9e9cde0370800000000000000
+      internalID: 8290806537881910594
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_14
+      rect:
+        serializedVersion: 2
+        x: 911
+        y: 54
+        width: 30
+        height: 39
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: fbbb43b099b4d6430800000000000000
+      internalID: 3777758783123798975
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_15
+      rect:
+        serializedVersion: 2
+        x: 937
+        y: 44
+        width: 28
+        height: 40
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: ee2c5596f98f590d0800000000000000
+      internalID: -3416551378739936530
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_16
+      rect:
+        serializedVersion: 2
+        x: 970
+        y: 51
+        width: 62
+        height: 55
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 527ab971ac41f37e0800000000000000
+      internalID: -1783684069203400923
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_17
+      rect:
+        serializedVersion: 2
+        x: 1036
+        y: 54
+        width: 63
+        height: 40
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: fc55fe30dd1416590800000000000000
+      internalID: -7682787071807760945
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_18
+      rect:
+        serializedVersion: 2
+        x: 1098
+        y: 54
+        width: 28
+        height: 30
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 60d29b2bdd5edd720800000000000000
+      internalID: 2872704877681257734
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_19
+      rect:
+        serializedVersion: 2
+        x: 1125
+        y: 44
+        width: 30
+        height: 40
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 580a1da11de7d9c50800000000000000
+      internalID: 6673629659396153477
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_20
+      rect:
+        serializedVersion: 2
+        x: 1154
+        y: 83
+        width: 10
+        height: 10
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 14c82d81c122f5a80800000000000000
+      internalID: -8476018469617103807
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_21
+      rect:
+        serializedVersion: 2
+        x: 1154
+        y: 54
+        width: 10
+        height: 30
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 142b2dfe7fa9ece00800000000000000
+      internalID: 1066960551404548673
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_22
+      rect:
+        serializedVersion: 2
+        x: 1165
+        y: 54
+        width: 27
+        height: 39
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 19b21c3b9e15631f0800000000000000
+      internalID: -1065574197641532527
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_23
+      rect:
+        serializedVersion: 2
+        x: 1203
+        y: 54
+        width: 56
+        height: 31
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 1e22217e37eebde60800000000000000
+      internalID: 7988240545637081825
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_24
+      rect:
+        serializedVersion: 2
+        x: 1258
+        y: 54
+        width: 42
+        height: 30
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: bdc6acbaf1fb50f50800000000000000
+      internalID: 6847088951233768667
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    - serializedVersion: 2
+      name: straight-train-track-collection_25
+      rect:
+        serializedVersion: 2
+        x: 1192
+        y: 54
+        width: 11
+        height: 11
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      customData: 
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 792a4019d86e5ec40800000000000000
+      internalID: 5541088412247040663
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
+    outline: []
+    customData: 
+    physicsShape: []
+    bones: []
+    spriteID: 
+    internalID: 0
+    vertices: []
+    indices: 
+    edges: []
+    weights: []
+    secondaryTextures: []
+    spriteCustomMetadata:
+      entries: []
+    nameFileIdTable:
+      straight-train-track-collection_0: 6568412859962952655
+      straight-train-track-collection_1: 1570093414777837705
+      straight-train-track-collection_10: -9044678187103546823
+      straight-train-track-collection_11: 4240081408774253073
+      straight-train-track-collection_12: 8500178648431121192
+      straight-train-track-collection_13: 8290806537881910594
+      straight-train-track-collection_14: 3777758783123798975
+      straight-train-track-collection_15: -3416551378739936530
+      straight-train-track-collection_16: -1783684069203400923
+      straight-train-track-collection_17: -7682787071807760945
+      straight-train-track-collection_18: 2872704877681257734
+      straight-train-track-collection_19: 6673629659396153477
+      straight-train-track-collection_2: -144485725098815434
+      straight-train-track-collection_20: -8476018469617103807
+      straight-train-track-collection_21: 1066960551404548673
+      straight-train-track-collection_22: -1065574197641532527
+      straight-train-track-collection_23: 7988240545637081825
+      straight-train-track-collection_24: 6847088951233768667
+      straight-train-track-collection_25: 5541088412247040663
+      straight-train-track-collection_3: -5256414681538792704
+      straight-train-track-collection_4: 564329096361837941
+      straight-train-track-collection_5: 7344526759158798498
+      straight-train-track-collection_6: -8511640729570472577
+      straight-train-track-collection_7: -8075552021816703771
+      straight-train-track-collection_8: 759945539439933726
+      straight-train-track-collection_9: -4380008593191194884
+  mipmapLimitGroupName: 
+  pSDRemoveMatte: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
