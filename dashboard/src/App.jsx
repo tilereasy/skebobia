@@ -100,11 +100,9 @@ function sourceLabel(event, agentById) {
   return "Unknown";
 }
 
-// Определить тип события по тегам или тексту
 function getEventType(event) {
   if (Array.isArray(event.tags)) {
     if (event.tags.includes("dialogue")) return "dialogue";
-    if (event.tags.includes("action")) return "action";
     if (event.tags.includes("system")) return "system";
   }
   if (event.source_type === "world") return "world";
@@ -112,7 +110,6 @@ function getEventType(event) {
   return "other";
 }
 
-// Мemoизированный компонент карточки агента
 const AgentCard = memo(({ agent, onInspect }) => (
   <article className="agent-card">
     <div className="agent-card-head">
@@ -153,7 +150,6 @@ export default function App() {
   // Новые состояния для фильтров событий
   const [eventFilters, setEventFilters] = useState({
     dialogue: true,
-    action: true,
     world: true,
     system: true,
     other: true,
@@ -278,7 +274,6 @@ export default function App() {
     }));
   }, []);
 
-  // Автоматическая очистка feedback сообщений
   useEffect(() => {
     if (controlFeedback) {
       const timer = setTimeout(() => setControlFeedback(""), FEEDBACK_TIMEOUT);
@@ -286,7 +281,6 @@ export default function App() {
     }
   }, [controlFeedback]);
 
-  // Загрузка начального состояния
   useEffect(() => {
     async function loadInitialState() {
       try {
@@ -310,7 +304,6 @@ export default function App() {
     loadInitialState();
   }, []);
 
-  // Установка messageAgentId при загрузке агентов
   useEffect(() => {
     if (agents.length === 0) {
       return;
@@ -320,7 +313,6 @@ export default function App() {
     }
   }, [agents, messageAgentId]);
 
-  // Сброс фильтра если агент удален
   useEffect(() => {
     if (filterAgentId === "all") {
       return;
@@ -330,7 +322,6 @@ export default function App() {
     }
   }, [agents, filterAgentId]);
 
-  // Автоскролл для ленты событий
   useEffect(() => {
     if (!autoScroll || !feedRef.current) {
       return;
@@ -338,7 +329,6 @@ export default function App() {
     feedRef.current.scrollTop = feedRef.current.scrollHeight;
   }, [filteredEvents, autoScroll]);
 
-  // Отслеживание размера графа
   useEffect(() => {
     if (!graphWrapRef.current) {
       return;
@@ -365,7 +355,6 @@ export default function App() {
     return () => observer.disconnect();
   }, []);
 
-  // WebSocket подключение
   useEffect(() => {
     shouldReconnectRef.current = true;
 
@@ -555,15 +544,7 @@ export default function App() {
                 checked={eventFilters.dialogue}
                 onChange={() => toggleEventFilter("dialogue")}
               />
-              💬 Dialogues
-            </label>
-            <label className="filter-checkbox">
-              <input
-                type="checkbox"
-                checked={eventFilters.action}
-                onChange={() => toggleEventFilter("action")}
-              />
-              ⚡ Actions
+              Dialogues
             </label>
             <label className="filter-checkbox">
               <input
@@ -571,7 +552,7 @@ export default function App() {
                 checked={eventFilters.world}
                 onChange={() => toggleEventFilter("world")}
               />
-              🌍 World
+              World
             </label>
             <label className="filter-checkbox">
               <input
@@ -579,7 +560,7 @@ export default function App() {
                 checked={eventFilters.system}
                 onChange={() => toggleEventFilter("system")}
               />
-              ⚙️ System
+              System
             </label>
           </div>
 
