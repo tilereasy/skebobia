@@ -59,10 +59,6 @@ class AgentDecision(BaseModel):
             else:
                 self.say_text = say_text[:280]
 
-        # Some providers output move/idle with filled say_text. Preserve usable language action.
-        if self.act in {"move", "idle"} and self.say_text is not None:
-            self.act = "message" if self.target_id else "say"
-
         if self.act == "message" and not self.target_id:
             self.act = "say"
         if self.act in {"say", "message"} and self.say_text is None:
@@ -261,11 +257,9 @@ class LLMTickDecider:
             return {}
 
         decisions_by_id: dict[str, AgentDecision] = {}
-        for idx, candidate in enumerate(candidates):
+        for candidate in candidates:
             normalized = self._normalize_candidate(
                 raw_candidate=candidate,
-                expected_agent_ids=expected_agent_ids,
-                index=idx,
             )
             if not normalized:
                 continue
@@ -275,15 +269,6 @@ class LLMTickDecider:
                 continue
 
             if decision.agent_id not in expected:
-                if idx < len(expected_agent_ids):
-                    fallback_id = expected_agent_ids[idx]
-                    if fallback_id not in decisions_by_id:
-                        patched = dict(normalized)
-                        patched["agent_id"] = fallback_id
-                        patched_decision = self._validate_normalized_decision(patched)
-                        if patched_decision is not None:
-                            decisions_by_id[fallback_id] = patched_decision
-                            continue
                 self._debug(f"LLM decider relaxed ignored unknown agent_id={decision.agent_id!r}")
                 continue
 
@@ -386,8 +371,6 @@ class LLMTickDecider:
         self,
         *,
         raw_candidate: Mapping[str, Any],
-        expected_agent_ids: list[str],
-        index: int,
     ) -> dict[str, Any] | None:
         candidate = dict(raw_candidate)
         nested = candidate.get("decision")
@@ -402,8 +385,6 @@ class LLMTickDecider:
             candidate,
             ("agent_id", "agentId", "agent", "id", "for_agent", "agentID"),
         )
-        if not agent_id and index < len(expected_agent_ids):
-            agent_id = expected_agent_ids[index]
         if not agent_id:
             return None
 

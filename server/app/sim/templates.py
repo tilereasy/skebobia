@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 
@@ -70,7 +71,27 @@ TEMPLATES: dict[str, list[str]] = {
         "{target_name}, все ровно?",
         "{target_name}, если что, дай знак.",
     ],
+    "voice_empathic": [
+        "Я рядом.",
+        "Спокойно, держимся вместе.",
+        "Давай без паники.",
+        "Слышу тебя.",
+    ],
+    "voice_aggressive": [
+        "Без лишних слов.",
+        "Действуем быстро.",
+        "По делу.",
+        "Хватит тянуть.",
+    ],
+    "voice_cool": [
+        "Принял.",
+        "Отмечено.",
+        "Фиксирую.",
+        "Понял сигнал.",
+    ],
 }
+
+LOGGER = logging.getLogger("app.sim.templates")
 
 
 def _mix_selector(selector: int) -> int:
@@ -103,6 +124,13 @@ def render(kind: str, selector: int, **kwargs: Any) -> str:
 
     class _SafeFormatDict(dict):
         def __missing__(self, key: str) -> str:  # pragma: no cover - defensive fallback
+            if LOGGER.isEnabledFor(logging.DEBUG):
+                LOGGER.debug(
+                    "Template missing key kind=%s key=%s payload_keys=%s",
+                    kind,
+                    key,
+                    sorted(payload.keys()),
+                )
             return ""
 
     return template.format_map(_SafeFormatDict(payload))

@@ -26,6 +26,16 @@
 - scene/ — Unity WebGL визуализация (позиции, реплики, эмоции)
 - gateway/ — nginx reverse proxy (один домен, разные пути)
 
+## Память (MVP, векторная)
+- Эпизодическая память хранится как **in-memory векторный индекс** (`server/app/memory/store.py`).
+- Для поиска используется embedding (`text-embedding-3-small`) и cosine similarity.
+- Если embedding API недоступен, включается hash-vector fallback, чтобы семантический поиск не обрывался.
+- При переполнении `MEMORY_EPISODES_PER_AGENT` старые записи автоматически сворачиваются в summary-эпизоды.
+
+## LLM-first режим
+- Флаг `LLM_FIRST_HARD_MODE=1` включает строгий режим: решения берутся из LLM, server fallback работает как fail-safe.
+- Fail-safe оставляет только безопасное поведение (reply при обязательном ответе или move/idle), а не полноценный rule-based "второй мозг".
+
 ## Протокол данных (общий для клиентов)
 Сервер шлёт в WebSocket (/ws/stream) сообщения:
 - type="event" — новое событие в мире
