@@ -73,11 +73,22 @@ TEMPLATES: dict[str, list[str]] = {
 }
 
 
+def _mix_selector(selector: int) -> int:
+    # Deterministic integer mixer to avoid obvious modulo cycles on sequential ticks.
+    value = abs(int(selector)) & 0xFFFFFFFF
+    value ^= value >> 16
+    value = (value * 0x45D9F3B) & 0xFFFFFFFF
+    value ^= value >> 16
+    value = (value * 0x45D9F3B) & 0xFFFFFFFF
+    value ^= value >> 16
+    return value
+
+
 def choose_template(kind: str, selector: int) -> str:
     options = TEMPLATES.get(kind, [])
     if not options:
         return "..."
-    return options[abs(selector) % len(options)]
+    return options[_mix_selector(selector) % len(options)]
 
 
 def render(kind: str, selector: int, **kwargs: Any) -> str:

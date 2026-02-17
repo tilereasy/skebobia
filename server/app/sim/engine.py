@@ -101,6 +101,123 @@ class StubWorld:
         dz = lhs.z - rhs.z
         return (dx * dx + dz * dz) ** 0.5
 
+    def _normalize_dialogue_text(self, text: str) -> str:
+        lowered = text.lower()
+        cleaned = "".join(ch if (ch.isalnum() or ch.isspace()) else " " for ch in lowered)
+        return " ".join(cleaned.split())
+
+    def _recent_dialogue_texts(self, limit: int = 12, source_id: str | None = None) -> list[str]:
+        items: list[str] = []
+        for event in reversed(self.state.event_log):
+            if source_id is not None and event.get("source_id") != source_id:
+                continue
+            tags = set(event.get("tags", []))
+            if "dialogue" not in tags and "agent_message" not in tags and "reply" not in tags:
+                continue
+            text = str(event.get("text", "")).strip()
+            if not text:
+                continue
+            items.append(text)
+            if len(items) >= limit:
+                break
+        return items
+
+    def _is_repetitive_dialogue(self, text: str, recent_texts: list[str]) -> bool:
+        candidate = self._normalize_dialogue_text(text)
+        if not candidate:
+            return True
+
+        candidate_tokens = set(candidate.split())
+        for previous in recent_texts:
+            previous_normalized = self._normalize_dialogue_text(previous)
+            if not previous_normalized:
+                continue
+            if candidate == previous_normalized:
+                return True
+
+            previous_tokens = set(previous_normalized.split())
+            if len(candidate_tokens) < 3 or len(previous_tokens) < 3:
+                continue
+            overlap = len(candidate_tokens & previous_tokens) / max(len(candidate_tokens), len(previous_tokens))
+            if overlap >= 0.85:
+                return True
+        return False
+
+    def _guess_text_kind(self, tags: list[str], target_id: str | None) -> str | None:
+        tags_set = set(tags)
+        if "conflict" in tags_set:
+            return "conflict"
+        if "help" in tags_set:
+            return "support"
+        if "memory" in tags_set:
+            return "memory"
+        if "agent_message" in tags_set:
+            return "agent_message" if target_id else "respond_agent"
+        if "user_message" in tags_set:
+            return "respond_user"
+        if "dialogue" in tags_set:
+            return "explore"
+        return None
+
+    def _render_text_variant(self, text_kind: str, selector: int, agent: AgentState, target_id: str | None) -> str:
+        target_name = self._agent_name(target_id) or target_id or "друг"
+        return templates.render(
+            text_kind,
+            selector,
+            target_name=target_name,
+            topic=(agent.last_topic or "текущей ситуации")[:45],
+            name=agent.name,
+        )
+
+    def _dedupe_dialogue_text(
+        self,
+        *,
+        agent: AgentState,
+        text: str,
+        tags: list[str],
+        target_id: str | None = None,
+        text_kind: str | None = None,
+    ) -> str:
+        candidate = text.strip()
+        if not candidate:
+            return candidate
+
+        recent = self._recent_dialogue_texts(limit=8, source_id=agent.id) + self._recent_dialogue_texts(limit=12)
+        if not self._is_repetitive_dialogue(candidate, recent):
+            return candidate
+
+        kind = text_kind or self._guess_text_kind(tags, target_id)
+        selector_base = (
+            self.state.tick * 113
+            + sum(ord(ch) for ch in agent.id) * 19
+            + len(candidate) * 7
+            + len(recent) * 5
+        )
+        if kind:
+            for offset in range(1, 10):
+                variant = self._render_text_variant(
+                    text_kind=kind,
+                    selector=selector_base + offset,
+                    agent=agent,
+                    target_id=target_id,
+                ).strip()
+                if variant and not self._is_repetitive_dialogue(variant, recent):
+                    return variant[:280]
+
+        stem = candidate.rstrip(".!? ")
+        if not stem:
+            stem = candidate
+        topic_hint = (agent.last_topic or "обстановке")[:32]
+        fallback_variants = [
+            f"{stem}. Уточняю: фокус на {topic_hint}.",
+            f"{stem}. Переформулирую: держим внимание на {topic_hint}.",
+            f"{stem}. Конкретика: проверяем {topic_hint}.",
+        ]
+        for variant in fallback_variants:
+            if not self._is_repetitive_dialogue(variant, recent):
+                return variant[:280]
+        return candidate[:280]
+
     def _event_prompt_item(self, event: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": event.get("id"),
@@ -347,6 +464,13 @@ class StubWorld:
 
         text = intent.text.strip() if intent.text else templates.render("explore", self.state.tick)
         tags = intent.tags if intent.tags else ["dialogue"]
+        text = self._dedupe_dialogue_text(
+            agent=agent,
+            text=text,
+            tags=tags,
+            target_id=intent.target_id,
+            text_kind=intent.text_kind,
+        )
         event = self._append_event(
             source_type="agent",
             source_id=agent.id,
@@ -392,6 +516,13 @@ class StubWorld:
             )
         )
         tags = intent.tags if intent.tags else ["agent_message", "dialogue"]
+        text = self._dedupe_dialogue_text(
+            agent=agent,
+            text=text,
+            tags=tags,
+            target_id=intent.target_id,
+            text_kind=intent.text_kind,
+        )
         event = self._append_event(
             source_type="agent",
             source_id=agent.id,
@@ -625,9 +756,19 @@ class StubWorld:
             if sentiment < 0 and parse_traits(speaker.traits).courage < 55:
                 text_line = templates.render("panic", selector)
                 tags = ["dialogue", "world", "conflict"]
+                text_kind = "panic"
             else:
                 text_line = templates.render("support", selector)
                 tags = ["dialogue", "world", "help"]
+                text_kind = "support"
+
+            text_line = self._dedupe_dialogue_text(
+                agent=speaker,
+                text=text_line,
+                tags=tags,
+                target_id=friend_id,
+                text_kind=text_kind,
+            )
 
             event = self._append_event(
                 source_type="agent",
@@ -759,9 +900,17 @@ class StubWorld:
         if sentiment < 0 and parse_traits(target.traits).aggression > 60:
             reply_text = templates.render("conflict", selector)
             reply_tags = ["dialogue", "reply", "user_message", "conflict"]
+            reply_kind = "conflict"
         else:
             reply_text = templates.render("respond_user", selector)
             reply_tags = ["dialogue", "reply", "user_message"]
+            reply_kind = "respond_user"
+        reply_text = self._dedupe_dialogue_text(
+            agent=target,
+            text=reply_text,
+            tags=reply_tags,
+            text_kind=reply_kind,
+        )
 
         reply = self._append_event(
             source_type="agent",

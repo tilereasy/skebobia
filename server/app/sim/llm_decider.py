@@ -59,14 +59,15 @@ class AgentDecision(BaseModel):
 class TickDecisionEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    decisions: list[AgentDecision] = Field(min_length=1, max_length=3)
+    decisions: list[AgentDecision] = Field(min_length=1, max_length=16)
 
 
 @dataclass
 class LLMTickDecider:
     client: LLMClient
     temperature: float = 0.2
-    max_agents_per_tick: int = 3
+    max_agents_per_tick: int = 4
+    strict_schema_validation: bool = False
 
     @classmethod
     def from_env(cls) -> "LLMTickDecider":
@@ -79,15 +80,21 @@ class LLMTickDecider:
         temperature = max(0.0, min(temperature, 1.0))
 
         try:
-            max_agents = int(os.getenv("LLM_DECIDER_MAX_AGENTS_PER_TICK", "3"))
+            max_agents = int(os.getenv("LLM_DECIDER_MAX_AGENTS_PER_TICK", "4"))
         except ValueError:
-            max_agents = 3
-        max_agents = max(1, min(max_agents, 3))
+            max_agents = 4
+        max_agents = max(1, min(max_agents, 16))
+
+        strict_schema_raw = os.getenv("LLM_DECIDER_STRICT_SCHEMA_VALIDATION")
+        strict_schema_validation = (
+            client.strict_json_schema if strict_schema_raw is None else strict_schema_raw.strip().lower() in {"1", "true", "yes", "on"}
+        )
 
         return cls(
             client=client,
             temperature=temperature,
             max_agents_per_tick=max_agents,
+            strict_schema_validation=strict_schema_validation,
         )
 
     @property
@@ -111,6 +118,8 @@ class LLMTickDecider:
         if not self.enabled or not agents_context or not expected_agent_ids:
             return {}
 
+        minimum_output_tokens = 220 + max(0, len(expected_agent_ids) - 1) * 140
+        minimum_output_tokens = max(220, min(minimum_output_tokens, 2600))
         response_obj = self.client.request_json_object(
             system_prompt=self._system_prompt(),
             user_payload=self._user_payload(
@@ -121,15 +130,19 @@ class LLMTickDecider:
             ),
             temperature=self.temperature,
             json_schema=TickDecisionEnvelope.model_json_schema(),
-            minimum_output_tokens=220 if len(expected_agent_ids) == 1 else 340,
+            minimum_output_tokens=minimum_output_tokens,
         )
         if not response_obj:
             self._debug("LLM decider got empty/invalid JSON object from client")
             return {}
 
         strict_decisions = self._validate_strict(response_obj=response_obj, expected_agent_ids=expected_agent_ids)
-        if strict_decisions:
+        if strict_decisions and len(strict_decisions) == len(expected_agent_ids):
             return strict_decisions
+        if self.strict_schema_validation:
+            if strict_decisions:
+                self._debug("LLM decider strict schema mode: rejected partial strict decision set")
+            return {}
 
         relaxed_decisions = self._validate_relaxed(response_obj=response_obj, expected_agent_ids=expected_agent_ids)
         if not relaxed_decisions:
@@ -493,7 +506,7 @@ class LLMTickDecider:
 
     def _system_prompt(self) -> str:
         return (
-            "You are a decision engine for a multi-agent social simulation.\n"
+            "You are a decision engine for a live multi-agent social simulation.\n"
             "Output strictly ONE minified JSON object on a single line.\n"
             "No markdown, no comments, no code fences, no trailing text.\n"
             "Use only ids from USER_CONTEXT_JSON.expected_agent_ids.\n"
@@ -502,6 +515,11 @@ class LLMTickDecider:
             "The server is authoritative and may reject unsafe choices.\n"
             "Conflicts are rare; prefer neutral or cooperative behavior.\n"
             "Actions must keep social coherence and avoid pointless isolation.\n"
+            "Primary dialogue language is Russian unless incoming context is clearly another language.\n"
+            "Use each agent's mood, traits and recent context to create distinct voice per agent.\n"
+            "Avoid generic assistant boilerplate (e.g. 'I'm here for you').\n"
+            "Do not mirror or copy recent messages verbatim; rephrase with new wording.\n"
+            "say_text must reference a concrete context signal (topic, inbox item, relation, or world event).\n"
             "Keep strings short: goal up to 60 chars, say_text up to 90 chars.\n"
             "\n"
             "Format:\n"
@@ -534,6 +552,12 @@ class LLMTickDecider:
             "expected_agent_ids": expected_agent_ids,
             "world": world_summary,
             "agents": agents_context,
+            "style_hints": {
+                "primary_language": "ru",
+                "must_sound_in_world": True,
+                "avoid_verbatim_repeat": True,
+                "avoid_generic_assistant_tone": True,
+            },
             "hard_limits": {
                 "decisions_count_must_match_agents_input": True,
                 "agent_ids_must_match_expected_agent_ids": True,
