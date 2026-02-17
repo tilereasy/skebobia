@@ -577,7 +577,6 @@ class LLMTickDecider:
             "Return exactly one decision per expected agent id.\n"
             "If a field is not used, set null.\n"
             "The server is authoritative and may reject unsafe choices.\n"
-            "Conflicts are rare; prefer neutral or cooperative behavior.\n"
             "Actions must keep social coherence and avoid pointless isolation.\n"
             "Primary dialogue language is Russian unless incoming context is clearly another language.\n"
             "Use each agent's mood, traits and recent context to create distinct voice per agent.\n"
@@ -587,8 +586,11 @@ class LLMTickDecider:
             "Keep strings short: goal up to 60 chars, say_text up to 90 chars.\n"
             "Use agent.allowed_actions and state.cooldowns as hard constraints.\n"
             "If say/message cooldown > 0, do not choose that action.\n"
-            "When inbox is non-empty and say/message is allowed, prefer say/message over idle.\n"
-            "If dialogue is allowed for multiple agents, keep at least ~50% actions as say/message.\n"
+            "If agent.queue.selected_for_reply is true, focus response on agent.queue.text.\n"
+            "If queue.source_type is agent and message action is allowed, prefer act='message' to queue.source_id.\n"
+            "When queue.selected_for_reply is true and queue.reply_policy.can_skip is false, avoid idle.\n"
+            "When queue.selected_for_reply is true and queue.reply_policy.can_skip is true, idle is allowed rarely.\n"
+            "If dialogue is allowed for multiple agents, keep the configured minimum share as say/message.\n"
             "\n"
             "Format:\n"
             "{\n"
@@ -615,13 +617,37 @@ class LLMTickDecider:
         expected_agent_ids: list[str],
     ) -> dict[str, Any]:
         dialogue_capable = 0
+        selected_for_reply = 0
+        can_skip_selected = 0
+        must_reply_selected = 0
         for agent_ctx in agents_context:
             if not isinstance(agent_ctx, dict):
                 continue
             allowed = agent_ctx.get("allowed_actions")
             if isinstance(allowed, list) and ("say" in allowed or "message" in allowed):
                 dialogue_capable += 1
-        min_dialogue_actions = 0 if dialogue_capable == 0 else max(1, dialogue_capable // 2)
+            queue = agent_ctx.get("queue")
+            if not isinstance(queue, dict):
+                continue
+            if queue.get("selected_for_reply") is not True:
+                continue
+            selected_for_reply += 1
+            reply_policy = queue.get("reply_policy")
+            can_skip = isinstance(reply_policy, dict) and bool(reply_policy.get("can_skip"))
+            if can_skip:
+                can_skip_selected += 1
+            else:
+                must_reply_selected += 1
+
+        if selected_for_reply > 0:
+            # Allow skips for a minority of selected agents, but keep most actions as replies.
+            max_skip_actions = min(can_skip_selected, max(1, selected_for_reply // 3))
+            min_dialogue_actions = max(
+                must_reply_selected,
+                selected_for_reply - max_skip_actions,
+            )
+        else:
+            min_dialogue_actions = 0 if dialogue_capable == 0 else max(1, dialogue_capable // 2)
 
         return {
             "task": "Return one decision per expected_agent_ids entry for the current tick.",
@@ -643,6 +669,8 @@ class LLMTickDecider:
                 "prefer_goal_len": 60,
                 "prefer_say_text_len": 90,
                 "min_say_or_message_actions_if_allowed": min_dialogue_actions,
+                "selected_for_reply_agents": selected_for_reply,
+                "max_idle_in_selected_queue": 0 if selected_for_reply == 0 else (selected_for_reply - min_dialogue_actions),
                 "response_should_be_minified_json_single_line": True,
                 "allowed_act_values": ["move", "say", "message", "idle"],
             },

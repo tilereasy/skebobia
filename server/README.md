@@ -4,7 +4,7 @@
 Сервер реализует симуляцию “виртуального мира”, в котором несколько автономных AI-агентов:
 - имеют личность (traits), настроение (mood), отношения (relations),
 - ведут события и диалоги,
-- сохраняют долговременную эпизодическую память (vector store),
+- сохраняют эпизодическую память (episodic memory store),
 - транслируют жизнь в реальном времени на клиент (WebSocket),
 - принимают вмешательства пользователя (события, сообщения, скорость времени).
 
@@ -22,25 +22,23 @@ id, name, avatar (изображение(url) или просто цвет), tra
 *“Тик” симуляции: сервер раз в T секунд делает шаг мира (tick), где часть агентов:*
 
 - читает входящие события/сообщения,
+- кладет реплики в очередь ответов (priority queue),
 
-- выбирает действие (через LLM или правило-фоллбек),
+- выбирает действие (LLM-first, rule-fallback только при ошибках/таймаутах),
+- обрабатывает только ограниченное число reply-задач за тик (для стабильной латентности),
+- добавляет ограниченное число proactive-агентов за тик, чтобы диалог не замирал при пустой очереди,
 
 - генерирует событие в ленту,
 
 - обновляет mood и relations.
 
-*Долговременная память:*
+*Память:*
 
 Эпизодическая память хранится как записи вида:
 
-- {agent_id, ts, text, tags, embedding, importance(optional), summary_ref(optional)}
+- {agent_id, ts, text, tags, importance, event_id, source_id, target_id}
 
-- Векторная БД используется для семантического поиска воспоминаний.
-
-При переполнении “контекста” (или при достижении лимита записей) запускается суммаризация:
-- старые записи сворачиваются в summary (кратко),
-
-- summary тоже сохраняется и может быть найден семантически.
+- На каждый тик в prompt передаются top-k воспоминаний, отобранных по релевантности и свежести.
 
 *Эмоциональный интеллект:*
 
@@ -89,11 +87,11 @@ app/main.py — FastAPI, роуты, ws
 
 app/sim/engine.py — tick-loop, scheduler, скорость времени
 
-app/agents/agent.py — логика агента (reflect → goal → act)
+app/agents/agent.py — состояние агента и сериализация
 
 app/llm/client.py — провайдер LLM (OpenAI/Gemini/YandexGPT) + таймауты/ретраи
 
-app/memory/store.py — vector store + суммаризация
+app/memory/store.py — in-memory episodic memory + retrieval
 
 app/db/models.py — сущности (Agent, Event, Relation, Memory)
 
@@ -103,9 +101,9 @@ app/ws/ — WebSocket endpoints + broadcaster
 
 #### **Хранилище**
 
-Postgres для событий/агентов/отношений
-
-Векторная БД для memory (pgvector)
+- runtime state мира хранится в памяти процесса сервера
+- эпизодическая память агентов хранится в in-memory store
+- PostgreSQL/pgvector в compose остаётся опциональным заделом под дальнейшую персистентность
 
 #### **API**
 
@@ -187,6 +185,23 @@ LLM_DECIDER_MAX_AGENTS_PER_TICK=16
 LLM_DECIDER_DEBUG=0
 LLM_DECIDER_STRICT_JSON_SCHEMA=0
 LLM_DECIDER_STRICT_SCHEMA_VALIDATION=0
+LLM_DECIDER_BACKFILL_RETRIES=2
+LLM_TARGET_RESPONSE_RATIO=0.9
+LLM_RESPONSE_RATIO_WINDOW=240
+LLM_PROMPT_RECENT_EVENTS=6
+LLM_PROMPT_INBOX=4
+LLM_PROMPT_MEMORIES=5
+REPLY_QUEUE_MAX_REPLIES_PER_TICK=2
+REPLY_QUEUE_MAX_WAIT_TICKS=10
+REPLY_QUEUE_MAX_SKIPS=2
+REPLY_QUEUE_MAX_SIZE=512
+LLM_PROACTIVE_AGENTS_PER_TICK=1
+STARTUP_WORLD_EVENT_ENABLED=1
+STARTUP_WORLD_EVENT_IMPORTANCE=0.85
+
+# Episodic memory
+MEMORY_ENABLED=1
+MEMORY_EPISODES_PER_AGENT=400
 
 #### Запуск
 
@@ -206,7 +221,8 @@ LLM_DECIDER_STRICT_SCHEMA_VALIDATION=0
     "pos": {"x": 12.3, "y": 0.0, "z": -4.1},
     "look_at": {"x": 0.0, "y": 0.0, "z": 1.0},
     "last_action": "say",
-    "last_say": "Прасти меня."
+    "last_say": "Прасти меня.",
+    "tick": 42
   }
 ]
 
@@ -217,7 +233,8 @@ LLM_DECIDER_STRICT_SCHEMA_VALIDATION=0
   "source_type": "agent|world",
   "source_id": "a1|null",
   "text": "Alice said: ...",
-  "tags": ["dialogue"]
+  "tags": ["dialogue"],
+  "tick": 52
 }
 
 ### relations payload (минимум)
