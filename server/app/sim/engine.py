@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -245,6 +246,12 @@ class StubWorld:
         return items
 
     def _agent_context_for_prompt(self, agent: AgentState) -> dict[str, Any]:
+        allowed_actions = ["move", "idle"]
+        if agent.say_cooldown == 0:
+            allowed_actions.append("say")
+        if agent.message_cooldown == 0:
+            allowed_actions.append("message")
+
         inbox_items = [
             {
                 "source_id": message.get("source_id"),
@@ -276,7 +283,14 @@ class StubWorld:
                 "mood_label": agent.mood_label,
                 "plan": agent.current_plan,
                 "pos": {"x": round(agent.pos.x, 2), "z": round(agent.pos.z, 2)},
+                "cooldowns": {
+                    "say": agent.say_cooldown,
+                    "message": agent.message_cooldown,
+                },
+                "last_action": agent.last_action,
+                "last_say": (agent.last_say or "")[:140],
             },
+            "allowed_actions": allowed_actions,
             "recent_events": [
                 self._event_prompt_item(event)
                 for event in list(self.state.event_log)[-self.prompt_recent_events_limit :]
@@ -319,6 +333,47 @@ class StubWorld:
             agents_context=contexts,
             expected_agent_ids=agent_ids,
         )
+
+    def _llm_decision_for_single_agent(self, agent_id: str) -> AgentDecision | None:
+        if not self.llm_decider.enabled:
+            return None
+        agent = self.state.agents.get(agent_id)
+        if agent is None:
+            return None
+        decisions = self.llm_decider.decide(
+            tick=self.state.tick,
+            world_summary=self._world_summary_for_prompt(),
+            agents_context=[self._agent_context_for_prompt(agent)],
+            expected_agent_ids=[agent_id],
+        )
+        return decisions.get(agent_id)
+
+    def _llm_debug(self, message: str) -> None:
+        if self.llm_decider.enabled and self.llm_decider.client.debug:
+            logging.getLogger("app.sim.engine").warning(message)
+
+    def _backfill_missing_llm_decisions(self, decisions: dict[str, AgentDecision]) -> dict[str, AgentDecision]:
+        if not self.llm_decider.enabled:
+            return decisions
+
+        filled = dict(decisions)
+        ordered_ids = [agent.id for agent in self._ordered_agents()]
+        missing_ids = [agent_id for agent_id in ordered_ids if agent_id not in filled]
+        if not missing_ids:
+            return filled
+
+        for agent_id in missing_ids:
+            single = self._llm_decision_for_single_agent(agent_id)
+            if single is not None:
+                filled[agent_id] = single
+
+        still_missing = [agent_id for agent_id in ordered_ids if agent_id not in filled]
+        self._llm_debug(
+            "LLM decision coverage "
+            f"after_backfill={len(filled)}/{len(ordered_ids)} "
+            f"missing={still_missing}"
+        )
+        return filled
 
     def _build_agents(self) -> dict[str, AgentState]:
         base = [
@@ -582,10 +637,10 @@ class StubWorld:
 
         if decision.act == "say":
             if agent.say_cooldown > 0:
-                return None
+                return ActionIntent(kind="idle")
             text = (decision.say_text or "").strip()
             if not text:
-                return None
+                return ActionIntent(kind="idle")
 
             target_id: str | None = None
             if (
@@ -604,16 +659,20 @@ class StubWorld:
 
         if decision.act == "message":
             if agent.message_cooldown > 0:
-                return None
+                return ActionIntent(kind="idle")
             target_id = decision.target_id
             text = (decision.say_text or "").strip()
             if (
-                not target_id
-                or target_id not in self.state.agents
-                or target_id == agent.id
-                or not text
+                not text
             ):
-                return None
+                return ActionIntent(kind="idle")
+            if not target_id or target_id not in self.state.agents or target_id == agent.id:
+                return ActionIntent(
+                    kind="say",
+                    text=text,
+                    tags=["dialogue", "llm"],
+                    target_id=None,
+                )
             return ActionIntent(
                 kind="message",
                 text=text,
@@ -790,6 +849,11 @@ class StubWorld:
         self._decrement_cooldowns()
 
         llm_decisions = self._llm_decisions_for_tick()
+        if self.llm_decider.enabled:
+            total = len(self.state.agents)
+            self._llm_debug(f"LLM decision coverage batch={len(llm_decisions)}/{total}")
+            if len(llm_decisions) < total:
+                llm_decisions = self._backfill_missing_llm_decisions(llm_decisions)
         events: list[dict] = []
         llm_relations_changed = False
         for agent in self._ordered_agents():
@@ -897,7 +961,18 @@ class StubWorld:
         target.last_topic = text[:60]
 
         selector = self.state.tick + self.state.next_event_id
-        if sentiment < 0 and parse_traits(target.traits).aggression > 60:
+        llm_decision = self._llm_decision_for_single_agent(target.id)
+        llm_reply_text = ""
+        if llm_decision is not None and llm_decision.say_text is not None:
+            llm_reply_text = llm_decision.say_text.strip()
+
+        if llm_reply_text:
+            reply_text = llm_reply_text
+            reply_tags = ["dialogue", "reply", "user_message", "llm"]
+            reply_kind = None
+            target.current_plan = llm_decision.goal.strip() or goal_to_plan(GOAL_RESPOND, target_name="user")
+            self._apply_llm_deltas(target, llm_decision)
+        elif sentiment < 0 and parse_traits(target.traits).aggression > 60:
             reply_text = templates.render("conflict", selector)
             reply_tags = ["dialogue", "reply", "user_message", "conflict"]
             reply_kind = "conflict"

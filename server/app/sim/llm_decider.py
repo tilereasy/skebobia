@@ -44,15 +44,36 @@ class AgentDecision(BaseModel):
     deltas: DecisionDeltas | None = None
 
     @model_validator(mode="after")
-    def validate_shape(self) -> "AgentDecision":
-        if self.act in {"say", "message"} and not (self.say_text and self.say_text.strip()):
-            raise ValueError("say_text is required for say/message actions")
+    def normalize_shape(self) -> "AgentDecision":
+        if self.target_id is not None:
+            target = self.target_id.strip()
+            if not target or target.lower() in {"null", "none", "nil", "n/a"}:
+                self.target_id = None
+            else:
+                self.target_id = target[:64]
+
+        if self.say_text is not None:
+            say_text = self.say_text.strip()
+            if not say_text or say_text.lower() in {"null", "none", "nil", "n/a"}:
+                self.say_text = None
+            else:
+                self.say_text = say_text[:280]
+
+        # Some providers output move/idle with filled say_text. Preserve usable language action.
+        if self.act in {"move", "idle"} and self.say_text is not None:
+            self.act = "message" if self.target_id else "say"
+
         if self.act == "message" and not self.target_id:
-            raise ValueError("target_id is required for message actions")
-        if self.act != "move" and self.move_to is not None:
-            raise ValueError("move_to is allowed only for move action")
-        if self.act not in {"say", "message"} and self.say_text is not None:
-            raise ValueError("say_text is allowed only for say/message actions")
+            self.act = "say"
+        if self.act in {"say", "message"} and self.say_text is None:
+            self.act = "idle"
+
+        if self.act != "move":
+            self.move_to = None
+        if self.act not in {"say", "message"}:
+            self.say_text = None
+        if self.act == "idle":
+            self.target_id = None
         return self
 
 
@@ -138,16 +159,58 @@ class LLMTickDecider:
 
         strict_decisions = self._validate_strict(response_obj=response_obj, expected_agent_ids=expected_agent_ids)
         if strict_decisions and len(strict_decisions) == len(expected_agent_ids):
+            self._debug(
+                "LLM decider accepted decisions "
+                f"branch=strict_full count={len(strict_decisions)} ids={sorted(strict_decisions.keys())}"
+            )
             return strict_decisions
-        if self.strict_schema_validation:
-            if strict_decisions:
-                self._debug("LLM decider strict schema mode: rejected partial strict decision set")
-            return {}
-
         relaxed_decisions = self._validate_relaxed(response_obj=response_obj, expected_agent_ids=expected_agent_ids)
-        if not relaxed_decisions:
-            self._debug("LLM decider fallback: no valid decisions after relaxed parsing")
-        return relaxed_decisions
+        chosen: dict[str, AgentDecision] = {}
+        branch = "none"
+        if self.strict_schema_validation:
+            if strict_decisions and relaxed_decisions:
+                merged = dict(strict_decisions)
+                for agent_id in expected_agent_ids:
+                    if agent_id not in merged and agent_id in relaxed_decisions:
+                        merged[agent_id] = relaxed_decisions[agent_id]
+                if len(merged) != len(strict_decisions):
+                    self._debug("LLM decider strict schema mode: filled missing strict decisions via relaxed parse")
+                chosen = merged
+                branch = "strict_plus_relaxed"
+            elif strict_decisions:
+                self._debug("LLM decider strict schema mode: using partial strict decision set")
+                chosen = strict_decisions
+                branch = "strict_partial"
+            elif relaxed_decisions:
+                self._debug("LLM decider strict schema mode: strict parse failed, using relaxed decisions")
+                chosen = relaxed_decisions
+                branch = "relaxed_in_strict_mode"
+            else:
+                self._debug("LLM decider strict schema mode: no valid decisions after strict/relaxed parsing")
+                chosen = {}
+                branch = "none"
+        else:
+            if strict_decisions and relaxed_decisions:
+                merged = dict(strict_decisions)
+                for agent_id in expected_agent_ids:
+                    if agent_id not in merged and agent_id in relaxed_decisions:
+                        merged[agent_id] = relaxed_decisions[agent_id]
+                chosen = merged
+                branch = "strict_plus_relaxed"
+            elif strict_decisions:
+                chosen = strict_decisions
+                branch = "strict_partial"
+            else:
+                if not relaxed_decisions:
+                    self._debug("LLM decider fallback: no valid decisions after relaxed parsing")
+                chosen = relaxed_decisions
+                branch = "relaxed_only" if relaxed_decisions else "none"
+
+        self._debug(
+            "LLM decider accepted decisions "
+            f"branch={branch} count={len(chosen)} ids={sorted(chosen.keys()) if chosen else []}"
+        )
+        return chosen
 
     def _validate_strict(
         self,
@@ -509,6 +572,7 @@ class LLMTickDecider:
             "You are a decision engine for a live multi-agent social simulation.\n"
             "Output strictly ONE minified JSON object on a single line.\n"
             "No markdown, no comments, no code fences, no trailing text.\n"
+            "Use JSON null values, never the string \"null\".\n"
             "Use only ids from USER_CONTEXT_JSON.expected_agent_ids.\n"
             "Return exactly one decision per expected agent id.\n"
             "If a field is not used, set null.\n"
@@ -521,6 +585,10 @@ class LLMTickDecider:
             "Do not mirror or copy recent messages verbatim; rephrase with new wording.\n"
             "say_text must reference a concrete context signal (topic, inbox item, relation, or world event).\n"
             "Keep strings short: goal up to 60 chars, say_text up to 90 chars.\n"
+            "Use agent.allowed_actions and state.cooldowns as hard constraints.\n"
+            "If say/message cooldown > 0, do not choose that action.\n"
+            "When inbox is non-empty and say/message is allowed, prefer say/message over idle.\n"
+            "If dialogue is allowed for multiple agents, keep at least ~50% actions as say/message.\n"
             "\n"
             "Format:\n"
             "{\n"
@@ -546,6 +614,15 @@ class LLMTickDecider:
         agents_context: list[dict[str, Any]],
         expected_agent_ids: list[str],
     ) -> dict[str, Any]:
+        dialogue_capable = 0
+        for agent_ctx in agents_context:
+            if not isinstance(agent_ctx, dict):
+                continue
+            allowed = agent_ctx.get("allowed_actions")
+            if isinstance(allowed, list) and ("say" in allowed or "message" in allowed):
+                dialogue_capable += 1
+        min_dialogue_actions = 0 if dialogue_capable == 0 else max(1, dialogue_capable // 2)
+
         return {
             "task": "Return one decision per expected_agent_ids entry for the current tick.",
             "tick": tick,
@@ -565,6 +642,7 @@ class LLMTickDecider:
                 "max_say_text_len": 280,
                 "prefer_goal_len": 60,
                 "prefer_say_text_len": 90,
+                "min_say_or_message_actions_if_allowed": min_dialogue_actions,
                 "response_should_be_minified_json_single_line": True,
                 "allowed_act_values": ["move", "say", "message", "idle"],
             },
