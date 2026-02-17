@@ -78,7 +78,7 @@ class WsHub:
 TICK_INTERVAL_SEC = float(os.getenv("TICK_INTERVAL_SEC", "1.0"))
 RELATIONS_INTERVAL_TICKS = int(os.getenv("RELATIONS_INTERVAL_TICKS", "5"))
 
-app = FastAPI(title="Skebobia Day 0 Stub Server", version="0.1.0")
+app = FastAPI(title="Skebobia LLM-first Server", version="0.2.0")
 world = StubWorld(relations_interval_ticks=RELATIONS_INTERVAL_TICKS)
 hub = WsHub()
 

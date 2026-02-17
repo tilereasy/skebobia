@@ -44,29 +44,51 @@ class AgentDecision(BaseModel):
     deltas: DecisionDeltas | None = None
 
     @model_validator(mode="after")
-    def validate_shape(self) -> "AgentDecision":
-        if self.act in {"say", "message"} and not (self.say_text and self.say_text.strip()):
-            raise ValueError("say_text is required for say/message actions")
+    def normalize_shape(self) -> "AgentDecision":
+        if self.target_id is not None:
+            target = self.target_id.strip()
+            if not target or target.lower() in {"null", "none", "nil", "n/a"}:
+                self.target_id = None
+            else:
+                self.target_id = target[:64]
+
+        if self.say_text is not None:
+            say_text = self.say_text.strip()
+            if not say_text or say_text.lower() in {"null", "none", "nil", "n/a"}:
+                self.say_text = None
+            else:
+                self.say_text = say_text[:280]
+
+        # Some providers output move/idle with filled say_text. Preserve usable language action.
+        if self.act in {"move", "idle"} and self.say_text is not None:
+            self.act = "message" if self.target_id else "say"
+
         if self.act == "message" and not self.target_id:
-            raise ValueError("target_id is required for message actions")
-        if self.act != "move" and self.move_to is not None:
-            raise ValueError("move_to is allowed only for move action")
-        if self.act not in {"say", "message"} and self.say_text is not None:
-            raise ValueError("say_text is allowed only for say/message actions")
+            self.act = "say"
+        if self.act in {"say", "message"} and self.say_text is None:
+            self.act = "idle"
+
+        if self.act != "move":
+            self.move_to = None
+        if self.act not in {"say", "message"}:
+            self.say_text = None
+        if self.act == "idle":
+            self.target_id = None
         return self
 
 
 class TickDecisionEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    decisions: list[AgentDecision] = Field(min_length=1, max_length=3)
+    decisions: list[AgentDecision] = Field(min_length=1, max_length=16)
 
 
 @dataclass
 class LLMTickDecider:
     client: LLMClient
     temperature: float = 0.2
-    max_agents_per_tick: int = 3
+    max_agents_per_tick: int = 4
+    strict_schema_validation: bool = False
 
     @classmethod
     def from_env(cls) -> "LLMTickDecider":
@@ -79,15 +101,21 @@ class LLMTickDecider:
         temperature = max(0.0, min(temperature, 1.0))
 
         try:
-            max_agents = int(os.getenv("LLM_DECIDER_MAX_AGENTS_PER_TICK", "3"))
+            max_agents = int(os.getenv("LLM_DECIDER_MAX_AGENTS_PER_TICK", "4"))
         except ValueError:
-            max_agents = 3
-        max_agents = max(1, min(max_agents, 3))
+            max_agents = 4
+        max_agents = max(1, min(max_agents, 16))
+
+        strict_schema_raw = os.getenv("LLM_DECIDER_STRICT_SCHEMA_VALIDATION")
+        strict_schema_validation = (
+            client.strict_json_schema if strict_schema_raw is None else strict_schema_raw.strip().lower() in {"1", "true", "yes", "on"}
+        )
 
         return cls(
             client=client,
             temperature=temperature,
             max_agents_per_tick=max_agents,
+            strict_schema_validation=strict_schema_validation,
         )
 
     @property
@@ -111,6 +139,8 @@ class LLMTickDecider:
         if not self.enabled or not agents_context or not expected_agent_ids:
             return {}
 
+        minimum_output_tokens = 220 + max(0, len(expected_agent_ids) - 1) * 140
+        minimum_output_tokens = max(220, min(minimum_output_tokens, 2600))
         response_obj = self.client.request_json_object(
             system_prompt=self._system_prompt(),
             user_payload=self._user_payload(
@@ -121,20 +151,66 @@ class LLMTickDecider:
             ),
             temperature=self.temperature,
             json_schema=TickDecisionEnvelope.model_json_schema(),
-            minimum_output_tokens=220 if len(expected_agent_ids) == 1 else 340,
+            minimum_output_tokens=minimum_output_tokens,
         )
         if not response_obj:
             self._debug("LLM decider got empty/invalid JSON object from client")
             return {}
 
         strict_decisions = self._validate_strict(response_obj=response_obj, expected_agent_ids=expected_agent_ids)
-        if strict_decisions:
+        if strict_decisions and len(strict_decisions) == len(expected_agent_ids):
+            self._debug(
+                "LLM decider accepted decisions "
+                f"branch=strict_full count={len(strict_decisions)} ids={sorted(strict_decisions.keys())}"
+            )
             return strict_decisions
-
         relaxed_decisions = self._validate_relaxed(response_obj=response_obj, expected_agent_ids=expected_agent_ids)
-        if not relaxed_decisions:
-            self._debug("LLM decider fallback: no valid decisions after relaxed parsing")
-        return relaxed_decisions
+        chosen: dict[str, AgentDecision] = {}
+        branch = "none"
+        if self.strict_schema_validation:
+            if strict_decisions and relaxed_decisions:
+                merged = dict(strict_decisions)
+                for agent_id in expected_agent_ids:
+                    if agent_id not in merged and agent_id in relaxed_decisions:
+                        merged[agent_id] = relaxed_decisions[agent_id]
+                if len(merged) != len(strict_decisions):
+                    self._debug("LLM decider strict schema mode: filled missing strict decisions via relaxed parse")
+                chosen = merged
+                branch = "strict_plus_relaxed"
+            elif strict_decisions:
+                self._debug("LLM decider strict schema mode: using partial strict decision set")
+                chosen = strict_decisions
+                branch = "strict_partial"
+            elif relaxed_decisions:
+                self._debug("LLM decider strict schema mode: strict parse failed, using relaxed decisions")
+                chosen = relaxed_decisions
+                branch = "relaxed_in_strict_mode"
+            else:
+                self._debug("LLM decider strict schema mode: no valid decisions after strict/relaxed parsing")
+                chosen = {}
+                branch = "none"
+        else:
+            if strict_decisions and relaxed_decisions:
+                merged = dict(strict_decisions)
+                for agent_id in expected_agent_ids:
+                    if agent_id not in merged and agent_id in relaxed_decisions:
+                        merged[agent_id] = relaxed_decisions[agent_id]
+                chosen = merged
+                branch = "strict_plus_relaxed"
+            elif strict_decisions:
+                chosen = strict_decisions
+                branch = "strict_partial"
+            else:
+                if not relaxed_decisions:
+                    self._debug("LLM decider fallback: no valid decisions after relaxed parsing")
+                chosen = relaxed_decisions
+                branch = "relaxed_only" if relaxed_decisions else "none"
+
+        self._debug(
+            "LLM decider accepted decisions "
+            f"branch={branch} count={len(chosen)} ids={sorted(chosen.keys()) if chosen else []}"
+        )
+        return chosen
 
     def _validate_strict(
         self,
@@ -493,16 +569,28 @@ class LLMTickDecider:
 
     def _system_prompt(self) -> str:
         return (
-            "You are a decision engine for a multi-agent social simulation.\n"
+            "You are a decision engine for a live multi-agent social simulation.\n"
             "Output strictly ONE minified JSON object on a single line.\n"
             "No markdown, no comments, no code fences, no trailing text.\n"
+            "Use JSON null values, never the string \"null\".\n"
             "Use only ids from USER_CONTEXT_JSON.expected_agent_ids.\n"
             "Return exactly one decision per expected agent id.\n"
             "If a field is not used, set null.\n"
             "The server is authoritative and may reject unsafe choices.\n"
-            "Conflicts are rare; prefer neutral or cooperative behavior.\n"
             "Actions must keep social coherence and avoid pointless isolation.\n"
+            "Primary dialogue language is Russian unless incoming context is clearly another language.\n"
+            "Use each agent's mood, traits and recent context to create distinct voice per agent.\n"
+            "Avoid generic assistant boilerplate (e.g. 'I'm here for you').\n"
+            "Do not mirror or copy recent messages verbatim; rephrase with new wording.\n"
+            "say_text must reference a concrete context signal (topic, inbox item, relation, or world event).\n"
             "Keep strings short: goal up to 60 chars, say_text up to 90 chars.\n"
+            "Use agent.allowed_actions and state.cooldowns as hard constraints.\n"
+            "If say/message cooldown > 0, do not choose that action.\n"
+            "If agent.queue.selected_for_reply is true, focus response on agent.queue.text.\n"
+            "If queue.source_type is agent and message action is allowed, prefer act='message' to queue.source_id.\n"
+            "When queue.selected_for_reply is true and queue.reply_policy.can_skip is false, avoid idle.\n"
+            "When queue.selected_for_reply is true and queue.reply_policy.can_skip is true, idle is allowed rarely.\n"
+            "If dialogue is allowed for multiple agents, keep the configured minimum share as say/message.\n"
             "\n"
             "Format:\n"
             "{\n"
@@ -528,12 +616,51 @@ class LLMTickDecider:
         agents_context: list[dict[str, Any]],
         expected_agent_ids: list[str],
     ) -> dict[str, Any]:
+        dialogue_capable = 0
+        selected_for_reply = 0
+        can_skip_selected = 0
+        must_reply_selected = 0
+        for agent_ctx in agents_context:
+            if not isinstance(agent_ctx, dict):
+                continue
+            allowed = agent_ctx.get("allowed_actions")
+            if isinstance(allowed, list) and ("say" in allowed or "message" in allowed):
+                dialogue_capable += 1
+            queue = agent_ctx.get("queue")
+            if not isinstance(queue, dict):
+                continue
+            if queue.get("selected_for_reply") is not True:
+                continue
+            selected_for_reply += 1
+            reply_policy = queue.get("reply_policy")
+            can_skip = isinstance(reply_policy, dict) and bool(reply_policy.get("can_skip"))
+            if can_skip:
+                can_skip_selected += 1
+            else:
+                must_reply_selected += 1
+
+        if selected_for_reply > 0:
+            # Allow skips for a minority of selected agents, but keep most actions as replies.
+            max_skip_actions = min(can_skip_selected, max(1, selected_for_reply // 3))
+            min_dialogue_actions = max(
+                must_reply_selected,
+                selected_for_reply - max_skip_actions,
+            )
+        else:
+            min_dialogue_actions = 0 if dialogue_capable == 0 else max(1, dialogue_capable // 2)
+
         return {
             "task": "Return one decision per expected_agent_ids entry for the current tick.",
             "tick": tick,
             "expected_agent_ids": expected_agent_ids,
             "world": world_summary,
             "agents": agents_context,
+            "style_hints": {
+                "primary_language": "ru",
+                "must_sound_in_world": True,
+                "avoid_verbatim_repeat": True,
+                "avoid_generic_assistant_tone": True,
+            },
             "hard_limits": {
                 "decisions_count_must_match_agents_input": True,
                 "agent_ids_must_match_expected_agent_ids": True,
@@ -541,6 +668,9 @@ class LLMTickDecider:
                 "max_say_text_len": 280,
                 "prefer_goal_len": 60,
                 "prefer_say_text_len": 90,
+                "min_say_or_message_actions_if_allowed": min_dialogue_actions,
+                "selected_for_reply_agents": selected_for_reply,
+                "max_idle_in_selected_queue": 0 if selected_for_reply == 0 else (selected_for_reply - min_dialogue_actions),
                 "response_should_be_minified_json_single_line": True,
                 "allowed_act_values": ["move", "say", "message", "idle"],
             },

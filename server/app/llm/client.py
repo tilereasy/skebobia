@@ -24,6 +24,8 @@ class LLMClient:
     max_output_tokens: int = 350
     max_retries: int = 0
     debug: bool = False
+    strict_json_schema: bool = False
+    json_schema_parse_retries: int = 1
     _sdk_client: OpenAI | None = None
     _json_schema_supported: bool = True
 
@@ -53,6 +55,15 @@ class LLMClient:
         max_retries = max(0, min(max_retries, 5))
 
         debug = _is_enabled(os.getenv("LLM_DECIDER_DEBUG", "0"))
+        strict_json_schema_raw = os.getenv("LLM_DECIDER_STRICT_JSON_SCHEMA")
+        strict_json_schema = (
+            model.startswith("gpt-4o") if strict_json_schema_raw is None else _is_enabled(strict_json_schema_raw)
+        )
+        try:
+            json_schema_parse_retries = int(os.getenv("LLM_DECIDER_JSON_SCHEMA_PARSE_RETRIES", "1"))
+        except ValueError:
+            json_schema_parse_retries = 1
+        json_schema_parse_retries = max(0, min(json_schema_parse_retries, 3))
 
         return cls(
             enabled=enabled and bool(base_url) and bool(model) and bool(api_key),
@@ -63,6 +74,8 @@ class LLMClient:
             max_output_tokens=max_output_tokens,
             max_retries=max_retries,
             debug=debug,
+            strict_json_schema=strict_json_schema,
+            json_schema_parse_retries=json_schema_parse_retries,
         )
 
     def request_json_object(
@@ -86,59 +99,74 @@ class LLMClient:
         effective_schema: dict[str, Any] | None = None
         if json_schema is not None and self._json_schema_supported:
             effective_schema = self._provider_compatible_schema(json_schema)
+        if json_schema is not None and self.strict_json_schema and effective_schema is None:
+            self._debug("LLM strict_json_schema enabled but json_schema is unavailable for provider")
+            return None
 
-        response_obj = None
         if effective_schema is not None:
-            response_obj = self._responses_create(
-                system_prompt=system_prompt,
-                user_payload=user_payload,
-                temperature=temperature,
-                json_schema=effective_schema,
-                max_output_tokens=effective_max_output_tokens,
-            )
+            attempts = max(1, self.json_schema_parse_retries + 1)
+            for attempt in range(attempts):
+                response_obj = self._responses_create(
+                    system_prompt=system_prompt,
+                    user_payload=user_payload,
+                    temperature=temperature,
+                    json_schema=effective_schema,
+                    max_output_tokens=effective_max_output_tokens,
+                )
+                if response_obj is None:
+                    break
+                parsed = self._extract_json_from_response(response_obj, prefer_structured=True)
+                if parsed is not None:
+                    return parsed
+                self._debug(f"LLM responses json_schema parse failed attempt={attempt + 1}/{attempts}")
 
-        if response_obj is None:
-            self._debug("LLM responses fallback: retry with json_object format")
-            response_obj = self._responses_create(
-                system_prompt=system_prompt,
-                user_payload=user_payload,
-                temperature=temperature,
-                json_schema=None,
-                max_output_tokens=effective_max_output_tokens,
-            )
+            for attempt in range(attempts):
+                response_obj = self._chat_completions_create(
+                    system_prompt=system_prompt,
+                    user_payload=user_payload,
+                    temperature=temperature,
+                    json_schema=effective_schema,
+                    max_output_tokens=effective_max_output_tokens,
+                )
+                if response_obj is None:
+                    break
+                parsed = self._extract_json_from_response(response_obj, prefer_structured=True)
+                if parsed is not None:
+                    return parsed
+                self._debug(f"LLM chat.completions json_schema parse failed attempt={attempt + 1}/{attempts}")
 
-        if response_obj is None:
-            self._debug("LLM responses fallback: try chat.completions")
-            response_obj = self._chat_completions_create(
-                system_prompt=system_prompt,
-                user_payload=user_payload,
-                temperature=temperature,
-                json_schema=effective_schema,
-                max_output_tokens=effective_max_output_tokens,
-            )
-        if response_obj is None and effective_schema is not None:
-            self._debug("LLM chat.completions fallback: retry with json_object format")
-            response_obj = self._chat_completions_create(
-                system_prompt=system_prompt,
-                user_payload=user_payload,
-                temperature=temperature,
-                json_schema=None,
-                max_output_tokens=effective_max_output_tokens,
-            )
+            if self.strict_json_schema:
+                self._debug("LLM strict_json_schema enabled: skip json_object fallback")
+                return None
 
-        if response_obj is None:
-            self._debug("LLM request failed: no JSON response")
-            return None
+        self._debug("LLM responses fallback: retry with json_object format")
+        response_obj = self._responses_create(
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            temperature=temperature,
+            json_schema=None,
+            max_output_tokens=effective_max_output_tokens,
+        )
+        if response_obj is not None:
+            parsed = self._extract_json_from_response(response_obj, prefer_structured=False)
+            if parsed is not None:
+                return parsed
 
-        content = self._extract_message_content(response_obj)
-        if not content:
-            self._debug("LLM response has no assistant text content")
-            return None
+        self._debug("LLM responses fallback: try chat.completions json_object format")
+        response_obj = self._chat_completions_create(
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            temperature=temperature,
+            json_schema=None,
+            max_output_tokens=effective_max_output_tokens,
+        )
+        if response_obj is not None:
+            parsed = self._extract_json_from_response(response_obj, prefer_structured=False)
+            if parsed is not None:
+                return parsed
 
-        parsed = self._extract_json_object(content)
-        if parsed is None:
-            self._debug(f"LLM returned non-JSON text prefix: {content[:280]!r}")
-        return parsed
+        self._debug("LLM request failed: no valid JSON object extracted")
+        return None
 
     def _build_input_text(
         self,
@@ -301,6 +329,96 @@ class LLMClient:
 
         return None
 
+    def _extract_json_from_response(self, response_obj: Any, *, prefer_structured: bool) -> dict[str, Any] | None:
+        if prefer_structured:
+            structured = self._extract_structured_json(response_obj)
+            if structured is not None:
+                return structured
+
+        content = self._extract_message_content(response_obj)
+        if isinstance(content, str) and content:
+            parsed = self._extract_json_object(content)
+            if parsed is not None:
+                return parsed
+            self._debug(f"LLM returned non-JSON text prefix: {content[:280]!r}")
+        else:
+            self._debug("LLM response has no assistant text content")
+
+        if not prefer_structured:
+            structured = self._extract_structured_json(response_obj)
+            if structured is not None:
+                return structured
+        return None
+
+    def _extract_structured_json(self, response_obj: Any) -> dict[str, Any] | None:
+        for attr in ("output_parsed", "parsed"):
+            payload = self._coerce_json_payload(getattr(response_obj, attr, None))
+            if payload is not None:
+                return payload
+
+        as_dict: dict[str, Any] | None = None
+        if isinstance(response_obj, dict):
+            as_dict = response_obj
+        else:
+            try:
+                dumped = response_obj.model_dump()
+                if isinstance(dumped, dict):
+                    as_dict = dumped
+            except Exception:
+                as_dict = None
+        if not isinstance(as_dict, dict):
+            return None
+
+        for key in ("output_parsed", "parsed", "json", "data"):
+            payload = self._coerce_json_payload(as_dict.get(key))
+            if payload is not None:
+                return payload
+
+        choices = as_dict.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            message = choices[0].get("message")
+            if isinstance(message, dict):
+                payload = self._coerce_json_payload(message.get("parsed"))
+                if payload is not None:
+                    return payload
+                content = message.get("content")
+                if isinstance(content, list):
+                    for item in content:
+                        if not isinstance(item, dict):
+                            continue
+                        for key in ("json", "parsed", "value", "data"):
+                            payload = self._coerce_json_payload(item.get(key))
+                            if payload is not None:
+                                return payload
+
+        output = as_dict.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("json", "parsed", "value", "data"):
+                    payload = self._coerce_json_payload(item.get(key))
+                    if payload is not None:
+                        return payload
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for content_item in content:
+                    if not isinstance(content_item, dict):
+                        continue
+                    for key in ("json", "parsed", "value", "data"):
+                        payload = self._coerce_json_payload(content_item.get(key))
+                        if payload is not None:
+                            return payload
+        return None
+
+    def _coerce_json_payload(self, payload: Any) -> dict[str, Any] | None:
+        if isinstance(payload, dict):
+            return payload
+        if isinstance(payload, list):
+            return {"decisions": payload}
+        return None
+
     def _extract_from_chat_choices_dict(self, response_dict: dict[str, Any]) -> str | None:
         choices = response_dict.get("choices")
         if not isinstance(choices, list) or not choices:
@@ -456,9 +574,21 @@ class LLMClient:
 
     def _is_response_format_schema_error(self, exc: Exception) -> bool:
         msg = str(exc).lower()
-        if "response_format" not in msg:
+        if "response_format" not in msg and "json_schema" not in msg and "schema" not in msg:
             return False
-        return ("invalid schema" in msg) or ("json_schema" in msg and "required" in msg)
+        schema_problem = any(
+            marker in msg
+            for marker in (
+                "invalid schema",
+                "schema is invalid",
+                "unknown parameter",
+                "unsupported",
+                "not supported",
+                "invalid type for",
+            )
+        )
+        missing_required = "json_schema" in msg and "required" in msg
+        return schema_problem or missing_required
 
     def _provider_compatible_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
         return self._normalize_schema_node(schema)
