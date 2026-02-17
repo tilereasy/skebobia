@@ -2,12 +2,16 @@ using UnityEngine;
 
 public sealed class Bootstrapper : MonoBehaviour
 {
+    [SerializeField] private GameObject speechBubblePrefab;
+
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void CreateBootstrapperIfMissing()
     {
         if (FindAnyObjectByType<StateLoader>() != null &&
             FindAnyObjectByType<NetConfig>() != null &&
-            FindAnyObjectByType<AgentRegistry>() != null)
+            FindAnyObjectByType<AgentRegistry>() != null &&
+            FindAnyObjectByType<WsClient>() != null &&
+            FindAnyObjectByType<StreamRouter>() != null)
         {
             return;
         }
@@ -28,14 +32,26 @@ public sealed class Bootstrapper : MonoBehaviour
             gameObject.AddComponent<NetConfig>();
         }
 
-        if (GetComponent<AgentRegistry>() == null)
+        AgentRegistry agentRegistry = GetComponent<AgentRegistry>();
+        if (agentRegistry == null)
         {
-            gameObject.AddComponent<AgentRegistry>();
+            agentRegistry = gameObject.AddComponent<AgentRegistry>();
         }
+        agentRegistry.SetSpeechBubblePrefab(speechBubblePrefab);
 
         if (GetComponent<StateLoader>() == null)
         {
             gameObject.AddComponent<StateLoader>();
+        }
+
+        if (GetComponent<WsClient>() == null)
+        {
+            gameObject.AddComponent<WsClient>();
+        }
+
+        if (GetComponent<StreamRouter>() == null)
+        {
+            gameObject.AddComponent<StreamRouter>();
         }
     }
 }

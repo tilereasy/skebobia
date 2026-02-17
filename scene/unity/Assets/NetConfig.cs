@@ -10,10 +10,14 @@ public sealed class NetConfig : MonoBehaviour
     [Header("Paths")]
     [SerializeField] private string apiPrefix = "/api";
     [SerializeField] private string statePath = "/state";
+    [SerializeField] private string wsPrefix = "/ws";
+    [SerializeField] private string streamPath = "/stream";
 
     public string Origin => ResolveOrigin();
     public string ApiBaseUrl => CombineUrl(Origin, NormalizePath(apiPrefix, trimTrailingSlash: true));
     public string StateUrl => CombineUrl(ApiBaseUrl, NormalizePath(statePath, trimTrailingSlash: false));
+    public string WsBaseUrl => CombineUrl(ToWebSocketOrigin(Origin), NormalizePath(wsPrefix, trimTrailingSlash: true));
+    public string StreamWsUrl => CombineUrl(WsBaseUrl, NormalizePath(streamPath, trimTrailingSlash: false));
 
     private string resolvedOrigin = "";
 
@@ -77,5 +81,29 @@ public sealed class NetConfig : MonoBehaviour
         }
 
         return root.TrimEnd('/') + path;
+    }
+
+    private static string ToWebSocketOrigin(string origin)
+    {
+        if (!Uri.TryCreate(origin, UriKind.Absolute, out Uri uri))
+        {
+            return origin;
+        }
+
+        string scheme;
+        if (string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
+        {
+            scheme = "wss";
+        }
+        else if (string.Equals(uri.Scheme, "wss", StringComparison.OrdinalIgnoreCase))
+        {
+            scheme = "wss";
+        }
+        else
+        {
+            scheme = "ws";
+        }
+
+        return $"{scheme}://{uri.Authority}";
     }
 }
