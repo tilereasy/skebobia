@@ -311,6 +311,7 @@ const STYLES = `
   overflow-y: auto;
   max-height: 600px;
   padding: 8px 0;
+  background: var(--bg-panel);
   }
 
   .event-item {
@@ -321,6 +322,7 @@ const STYLES = `
     position: relative;
     z-index: 2;
     isolation: isolate;
+    background: var(--bg-panel);
   }
   @keyframes fadeSlideIn {
     from { opacity: 0; transform: translateX(-6px); }
@@ -347,7 +349,7 @@ const STYLES = `
     background: rgba(0,220,255,0.06); padding: 1px 5px; border-radius: 2px;
   }
   .event-item p {
-    color: #000000 !important;
+    color: #ffffff !important;
     font-size: 12.5px;
     line-height: 1.55;
     position: relative;
@@ -638,7 +640,7 @@ const STYLES = `
     "feed graph side";
   }
 
-  .feed-panel         { grid-area: feed; }
+  .feed-panel         { grid-area: feed;}
   .graph-panel-compact { grid-area: graph; }
   .side-panel         { grid-area: side; }
 }
