@@ -10,7 +10,7 @@ public sealed class AgentRegistry : MonoBehaviour
     [SerializeField] private Vector3 agentScale = new Vector3(0.8f, 0.8f, 1f);
     [SerializeField, Min(0.1f)] private float moveSpeed = 5f;
     [SerializeField] private Vector3 nameOffset = new Vector3(0f, 0.9f, 0f);
-    [SerializeField] private Vector3 speechBubbleOffset = new Vector3(1.6f, 1.2f, 0f);
+    [SerializeField] private Vector3 speechBubbleOffset = new Vector3(0.8f, 0.6f, 0f);
     [SerializeField, Min(0.1f)] private float nameFontSize = 2.5f;
     [SerializeField] private Color nameColor = Color.white;
     [SerializeField] private bool removeMissingAgents = true;
@@ -115,6 +115,8 @@ public sealed class AgentRegistry : MonoBehaviour
         speechBubblePrefab = prefab;
     }
 
+    public TMP_FontAsset cyrillicFont; 
+
     public bool ShowBubble(string agentId, string text, float ttlSec)
     {
         if (string.IsNullOrWhiteSpace(agentId) || string.IsNullOrWhiteSpace(text)) return false;
@@ -156,8 +158,10 @@ public sealed class AgentRegistry : MonoBehaviour
         label.text = displayName;
         label.color = nameColor;
         label.fontSize = nameFontSize;
+        
         label.transform.localPosition = nameOffset;
 
+        
         SpriteRenderer renderer = EnsureRenderer(state.id, agentObject);
 
         if (!string.IsNullOrWhiteSpace(state.avatar) && ColorUtility.TryParseHtmlString(state.avatar, out Color parsed))
@@ -252,6 +256,9 @@ public sealed class AgentRegistry : MonoBehaviour
                 labelObject.transform.SetParent(agentObject.transform, false);
                 label = labelObject.AddComponent<TextMeshPro>();
             }
+
+            if (cyrillicFont != null)
+                label.font = cyrillicFont;
 
             label.alignment = TextAlignmentOptions.Center;
             label.enableWordWrapping = false;

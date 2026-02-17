@@ -651,7 +651,7 @@ MonoBehaviour:
     - line: '|   metroTileBackgroundColor: {r: 0.13333334, g: 0.17254902, b: 0.21568628,
         a: 0}'
     - line: '|   metroSplashScreenBackgroundColor: {r: 0.12941177, g: 0.17254902,
-        b: 0.21568628, a: 1}'
+        b: 0.21568628,    a: 1}'
     - line: '|   metroSplashScreenUseBackgroundColor: 0'
     - line: '|   syncCapabilities: 0'
     - line: '|   platformCapabilities: {}'
@@ -713,7 +713,7 @@ MonoBehaviour:
     - line: '|   cloudProjectId: 0c0d26d6-926e-4edf-9630-c319589890f8'
     - line: '|   framebufferDepthMemorylessMode: 0'
     - line: '|   qualitySettingsNames: []'
-    - line: '|   projectName: Skebobia Scene'
+    - line: '|   projectName: '
     - line: '|   organizationId: t1lereasy'
     - line: '|   cloudEnabled: 0'
     - line: '|   legacyClampBlendShapeWeights: 0'
