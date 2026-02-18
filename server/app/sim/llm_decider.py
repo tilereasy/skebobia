@@ -39,7 +39,11 @@ class AgentDecision(BaseModel):
     goal: str = Field(min_length=1, max_length=120)
     act: Literal["move", "say", "message", "idle"] = Field(validation_alias=AliasChoices("act", "action"))
     target_id: str | None = Field(default=None, max_length=64)
-    say_text: str | None = Field(default=None, max_length=280)
+    say_text: str | None = Field(default=None, max_length=360)
+    speech_intent: Literal["inform", "propose", "ask", "confirm", "coordinate"] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("speech_intent", "speechIntent", "utterance_role", "reply_role", "speech_role"),
+    )
     move_to: MoveTo | None = None
     evidence_ids: list[str] | None = Field(default=None, max_length=3)
     deltas: DecisionDeltas | None = None
@@ -58,7 +62,20 @@ class AgentDecision(BaseModel):
             if not say_text or say_text.lower() in {"null", "none", "nil", "n/a"}:
                 self.say_text = None
             else:
-                self.say_text = say_text[:280]
+                self.say_text = say_text[:360]
+                words = [token for token in self.say_text.split() if any(ch.isalpha() for ch in token)]
+                if len(words) < 2:
+                    self.say_text = None
+
+        if self.speech_intent is not None:
+            role = self.speech_intent.strip().lower()
+            allowed_roles = {"inform", "propose", "ask", "confirm", "coordinate"}
+            if role in {"null", "none", "nil", "n/a", ""}:
+                self.speech_intent = None
+            elif role in allowed_roles:
+                self.speech_intent = role  # type: ignore[assignment]
+            else:
+                self.speech_intent = None
 
         if self.evidence_ids is not None:
             normalized_evidence_ids: list[str] = []
@@ -87,8 +104,21 @@ class AgentDecision(BaseModel):
             self.move_to = None
         if self.act not in {"say", "message"}:
             self.say_text = None
+            self.speech_intent = None
         if self.act == "idle":
             self.target_id = None
+        if self.act in {"say", "message"} and self.say_text and self.speech_intent is None:
+            lowered = self.say_text.lower()
+            if "?" in lowered:
+                self.speech_intent = "ask"
+            elif any(token in lowered for token in ("предлага", "давай", "план", "собер", "встрет")):
+                self.speech_intent = "propose"
+            elif any(token in lowered for token in ("принял", "понял", "согласен", "подтвержда")):
+                self.speech_intent = "confirm"
+            elif any(token in lowered for token in ("в", "у", "через")) and self.act == "message":
+                self.speech_intent = "coordinate"
+            else:
+                self.speech_intent = "inform"
         return self
 
 
@@ -396,6 +426,10 @@ class LLMTickDecider:
                 "act",
                 "action",
                 "kind",
+                "speech_intent",
+                "speechIntent",
+                "utterance_role",
+                "reply_role",
                 "goal",
                 "plan",
                 "say_text",
@@ -449,14 +483,21 @@ class LLMTickDecider:
             candidate,
             ("say_text", "sayText", "text", "message", "utterance", "speech", "content", "reply"),
         )
+        speech_intent = self._first_str(
+            candidate,
+            ("speech_intent", "speechIntent", "utterance_role", "reply_role", "speech_role"),
+        )
+        if speech_intent:
+            speech_intent = speech_intent.lower()
         move_to = self._extract_move_to(candidate)
         evidence_ids = self._extract_evidence_ids(candidate)
         deltas = self._extract_deltas(candidate)
 
         if act in {"say", "message"} and say_text:
-            say_text = say_text[:280]
+            say_text = say_text[:360]
         if act not in {"say", "message"}:
             say_text = None
+            speech_intent = None
         if act != "move":
             move_to = None
 
@@ -466,6 +507,7 @@ class LLMTickDecider:
             "act": act,
             "target_id": target_id[:64] if target_id else None,
             "say_text": say_text,
+            "speech_intent": speech_intent,
             "move_to": move_to,
             "evidence_ids": evidence_ids,
             "deltas": deltas,
@@ -642,12 +684,17 @@ class LLMTickDecider:
             "Avoid generic assistant boilerplate (e.g. 'I'm here for you').\n"
             "Do not mirror or copy recent messages verbatim; rephrase with new wording.\n"
             "say_text must reference a concrete context signal (topic, inbox item, relation, or world event).\n"
+            "One-word replies are forbidden.\n"
             "For act='move' set say_text=null.\n"
-            "Keep strings short: goal up to 60 chars, say_text up to 90 chars.\n"
+            "Keep strings concise but informative: goal up to 60 chars, say_text preferably 140-180 chars.\n"
             "Use agent.allowed_actions and state.cooldowns as hard constraints.\n"
             "If say/message cooldown > 0, do not choose that action.\n"
             "If agent.queue.selected_for_reply is true, focus response on agent.queue.text.\n"
-            "If queue.source_type is agent and message action is allowed, prefer act='message' to queue.source_id.\n"
+            "If queue.must_message_source is true, act MUST be 'message' and target_id MUST equal queue.source_id.\n"
+            "If queue.answer_first is true, answer queue text directly and do not ask a new question.\n"
+            "If queue.question_allowed_now is false, say_text must not contain '?'.\n"
+            "When answering a message/question, say_text should be at least 8-12 words except danger/panic contexts.\n"
+            "Every say/message must choose speech_intent in [inform, propose, ask, confirm, coordinate].\n"
             "If queue.source_type is world and queue.allow_move_instead_of_say is true, act can be 'say' or 'move'.\n"
             "When queue.selected_for_reply is true and queue.reply_policy.can_skip is false, avoid idle.\n"
             "When queue.selected_for_reply is true and queue.reply_policy.can_skip is true, idle is allowed rarely.\n"
@@ -664,6 +711,7 @@ class LLMTickDecider:
             '      "act": "move|say|message|idle",\n'
             '      "target_id": "agent id|null",\n'
             '      "say_text": "text|null",\n'
+            '      "speech_intent": "inform|propose|ask|confirm|coordinate|null",\n'
             '      "move_to": {"x": number, "z": number} | null,\n'
             '      "evidence_ids": ["id1","id2"] | null,\n'
             '      "deltas": {"self_mood": int(-10..10), "relations":[{"to_id":"id","delta":int(-5..5)}]} | null\n'
@@ -684,7 +732,10 @@ class LLMTickDecider:
         selected_for_reply = 0
         can_skip_selected = 0
         must_text_reply_selected = 0
+        must_message_selected = 0
         world_action_reply_selected = 0
+        answer_first_selected = 0
+        question_blocked_agents = 0
         for agent_ctx in agents_context:
             if not isinstance(agent_ctx, dict):
                 continue
@@ -694,11 +745,19 @@ class LLMTickDecider:
             queue = agent_ctx.get("queue")
             if not isinstance(queue, dict):
                 continue
+            if bool(queue.get("answer_first")) or queue.get("question_allowed_now") is False:
+                question_blocked_agents += 1
             if queue.get("selected_for_reply") is not True:
                 continue
             selected_for_reply += 1
+            if bool(queue.get("answer_first")):
+                answer_first_selected += 1
             if bool(queue.get("allow_move_instead_of_say")):
                 world_action_reply_selected += 1
+                continue
+            if bool(queue.get("must_message_source")):
+                must_message_selected += 1
+                must_text_reply_selected += 1
                 continue
             reply_policy = queue.get("reply_policy")
             can_skip = isinstance(reply_policy, dict) and bool(reply_policy.get("can_skip"))
@@ -734,14 +793,19 @@ class LLMTickDecider:
                 "decisions_count_must_match_agents_input": True,
                 "agent_ids_must_match_expected_agent_ids": True,
                 "max_goal_len": 120,
-                "max_say_text_len": 280,
+                "max_say_text_len": 360,
                 "prefer_goal_len": 60,
-                "prefer_say_text_len": 90,
+                "prefer_say_text_len": 180,
+                "min_words_for_reply_text": 8,
                 "max_evidence_ids": 3,
+                "allowed_speech_intents": ["inform", "propose", "ask", "confirm", "coordinate"],
                 "anti_jitter_move_when_last_action_move": True,
                 "min_say_or_message_actions_if_allowed": min_dialogue_actions,
                 "selected_for_reply_agents": selected_for_reply,
+                "selected_reply_answer_first_agents": answer_first_selected,
+                "selected_reply_must_message_agents": must_message_selected,
                 "selected_reply_agents_allowing_move_action": world_action_reply_selected,
+                "max_question_actions_for_tick": max(0, len(expected_agent_ids) - question_blocked_agents),
                 "max_idle_in_selected_queue": 0 if selected_for_reply == 0 else (selected_for_reply - min_dialogue_actions),
                 "response_should_be_minified_json_single_line": True,
                 "allowed_act_values": ["move", "say", "message", "idle"],

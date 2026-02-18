@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Deque
 
 from app.agents.agent import AgentState, Vec3, plan_for_mood
-from app.memory.store import EpisodicMemoryStore
+from app.memory.store import EpisodicMemoryStore, _tokenize
 from app.sim import templates
 from app.sim.llm_decider import AgentDecision, LLMTickDecider
 from app.sim.movement import SAFE_POINT, pick_wander_target, step_towards
@@ -78,6 +78,11 @@ class ActionIntent:
     destination: Vec3 | None = None
     text_kind: str | None = None
     llm_generated: bool = False
+    thread_id: str | None = None
+    expects_reply: bool | None = None
+    force_non_question: bool = False
+    speech_intent: str | None = None
+    evidence_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -87,6 +92,9 @@ class ReplyTask:
     inbox_id: str
     source_id: str | None
     source_type: str
+    thread_id: str | None
+    expects_reply: bool
+    can_reply: bool
     text: str
     tags: tuple[str, ...]
     created_tick: int
@@ -144,6 +152,10 @@ class StubWorld:
         self.reply_queue_max_skips = _env_int("REPLY_QUEUE_MAX_SKIPS", 2, 0, 8)
         self.world_reply_ttl_ticks = _env_int("REPLY_WORLD_TTL_TICKS", 8, 1, 120)
         self.unqueued_reply_release_ticks = _env_int("REPLY_UNQUEUED_RELEASE_TICKS", 4, 1, 32)
+        self.question_min_interval_ticks = _env_int("QUESTION_MIN_INTERVAL_TICKS", 6, 1, 120)
+        self.question_max_interval_ticks = _env_int("QUESTION_MAX_INTERVAL_TICKS", 10, self.question_min_interval_ticks, 240)
+        self.reply_min_words_default = _env_int("REPLY_MIN_WORDS", 8, 3, 30)
+        self.reply_min_words_danger = _env_int("REPLY_MIN_WORDS_DANGER", 4, 1, 20)
         self.reply_queue: Deque[ReplyTask] = deque(maxlen=_env_int("REPLY_QUEUE_MAX_SIZE", 512, 32, 4096))
         self.reply_task_by_inbox_id: dict[str, ReplyTask] = {}
         self.reply_task_seq = 0
@@ -157,6 +169,8 @@ class StubWorld:
             1,
             240,
         )
+        self.micro_world_events_enabled = _env_bool("MICRO_WORLD_EVENTS_ENABLED", True)
+        self.micro_world_event_interval_ticks = _env_int("MICRO_WORLD_EVENT_INTERVAL_TICKS", 9, 3, 240)
 
         self.reply_policy_by_agent: dict[str, ReplyPolicy] = {}
         for agent in agents.values():
@@ -187,6 +201,152 @@ class StubWorld:
         dz = lhs.z - rhs.z
         return (dx * dx + dz * dz) ** 0.5
 
+    def _question_interval_for_agent(self, agent_id: str) -> int:
+        span = max(0, self.question_max_interval_ticks - self.question_min_interval_ticks)
+        if span == 0:
+            return self.question_min_interval_ticks
+        return self.question_min_interval_ticks + (sum(ord(ch) for ch in agent_id) % (span + 1))
+
+    @staticmethod
+    def _text_has_question(text: str) -> bool:
+        return "?" in str(text).strip()
+
+    def _can_ask_question_now(self, agent: AgentState) -> bool:
+        interval = self._question_interval_for_agent(agent.id)
+        return (self.state.tick - agent.last_question_tick) >= interval
+
+    @staticmethod
+    def _strip_question_form(text: str) -> str:
+        cleaned = " ".join(str(text).replace("?", ".").split()).strip()
+        if not cleaned:
+            return "Понял."
+        if cleaned[-1] not in ".!":
+            cleaned = f"{cleaned}."
+        return cleaned
+
+    def _enforce_question_policy_text(
+        self,
+        agent: AgentState,
+        text: str,
+        *,
+        force_non_question: bool = False,
+    ) -> str:
+        if not self._text_has_question(text):
+            return text
+        if force_non_question or not self._can_ask_question_now(agent):
+            return self._strip_question_form(text)
+        return text
+
+    def _mark_question_emitted(self, agent: AgentState, text: str) -> None:
+        if self._text_has_question(text):
+            agent.last_question_tick = self.state.tick
+
+    @staticmethod
+    def _word_count(text: str) -> int:
+        return sum(1 for token in str(text).split() if any(ch.isalpha() for ch in token))
+
+    @staticmethod
+    def _has_action_or_proposal(text: str) -> bool:
+        lowered = str(text).lower()
+        markers = (
+            "иду",
+            "пойду",
+            "подойду",
+            "двигаюсь",
+            "проверю",
+            "уточню",
+            "сделаю",
+            "предлагаю",
+            "давай",
+            "собер",
+            "встрет",
+            "координ",
+            "перенесу",
+            "план",
+        )
+        return any(marker in lowered for marker in markers)
+
+    @staticmethod
+    def _has_fact_link(text: str, evidence_ids: list[str]) -> bool:
+        if not evidence_ids:
+            return False
+        lowered = str(text).lower()
+        if any(str(eid).lower() in lowered for eid in evidence_ids):
+            return True
+        fact_markers = ("событ", "видел", "по памяти", "в лог", "по факту", "наблюдал", "отметил")
+        return any(marker in lowered for marker in fact_markers)
+
+    def _is_danger_reply_context(self, message: dict[str, Any] | None) -> bool:
+        if not message:
+            return False
+        tags = {str(tag).lower() for tag in message.get("tags", [])}
+        if tags & {"panic", "danger", "conflict", "urgent"}:
+            return True
+        lowered = str(message.get("text", "")).lower()
+        danger_markers = ("опасн", "тревог", "пожар", "угроз", "срочн", "конфликт", "шторм")
+        return any(marker in lowered for marker in danger_markers)
+
+    def _looks_like_looping_coordination_question(self, text: str) -> bool:
+        normalized = self._normalize_dialogue_text(text)
+        patterns = (
+            "что нам делать дальше",
+            "что делать дальше",
+            "какой план дальше",
+            "что дальше",
+            "что будем делать",
+            "как поступим дальше",
+        )
+        return any(pattern in normalized for pattern in patterns)
+
+    def _reply_substance_ok(
+        self,
+        *,
+        agent: AgentState,
+        intent: ActionIntent,
+        source_message: dict[str, Any] | None,
+    ) -> tuple[bool, str]:
+        if intent.kind not in {"say", "message"}:
+            return False, "non_text_action"
+
+        reply_text = str(intent.text).strip()
+        if not reply_text:
+            return False, "empty_text"
+
+        if self._looks_like_looping_coordination_question(reply_text):
+            recent = self._recent_dialogue_texts(limit=4, source_id=agent.id)
+            if any(self._looks_like_looping_coordination_question(previous) for previous in recent):
+                return False, "repetitive_loop"
+
+        min_words = self.reply_min_words_danger if self._is_danger_reply_context(source_message) else self.reply_min_words_default
+        if self._word_count(reply_text) < min_words:
+            return False, "too_short"
+
+        source_text = ""
+        if source_message is not None:
+            source_text = str(source_message.get("text", ""))
+        topic_text = source_text or str(agent.last_topic or "")
+        source_tokens = _tokenize(topic_text)
+        reply_tokens = _tokenize(reply_text)
+        needed_overlap = 2 if len(source_tokens) >= 5 else 1
+        overlap_ok = len(source_tokens & reply_tokens) >= needed_overlap if source_tokens else False
+
+        if overlap_ok:
+            return True, "topic_overlap"
+        if self._has_action_or_proposal(reply_text):
+            return True, "actionable"
+        if self._has_fact_link(reply_text, intent.evidence_ids):
+            return True, "fact_link"
+
+        return False, "low_substance"
+
+    def _fallback_move_intent(self, agent: AgentState, reply_task: ReplyTask | None = None) -> ActionIntent:
+        if reply_task is not None and reply_task.source_id and reply_task.source_id in self.state.agents:
+            return ActionIntent(kind="move", target_id=reply_task.source_id)
+        friend_id = pick_best_friend(self.state.relations, agent.id, sorted(self.state.agents.keys()))
+        if friend_id:
+            return ActionIntent(kind="move", target_id=friend_id)
+        return ActionIntent(kind="move", destination=pick_wander_target(agent.id, self.state.tick))
+
     def _build_reply_policy(self, agent: AgentState) -> ReplyPolicy:
         traits = parse_traits(agent.traits)
         skip_bias = 0.0
@@ -208,6 +368,26 @@ class StubWorld:
                 return message
         return None
 
+    def _selected_required_inbox_message(
+        self,
+        agent: AgentState,
+        reply_task: ReplyTask | None = None,
+    ) -> dict[str, Any] | None:
+        if reply_task is not None:
+            return self._find_inbox_message(agent, reply_task.inbox_id)
+        for message in reversed(agent.inbox):
+            if self._is_inbox_message_reply_required(message, mutate=False):
+                return message
+        return None
+
+    @staticmethod
+    def _reply_task_requires_source_message(reply_task: ReplyTask | None) -> bool:
+        return bool(
+            reply_task is not None
+            and reply_task.source_type == "agent"
+            and reply_task.source_id
+        )
+
     def _classify_requires_reply(self, source_type: str, tags: list[str]) -> bool:
         tags_set = set(tags)
         if "user_message" in tags_set or "important" in tags_set:
@@ -219,7 +399,9 @@ class StubWorld:
         return "dialogue" in tags_set or "agent_message" in tags_set or "reply" in tags_set
 
     def _is_inbox_message_reply_required(self, message: dict[str, Any], *, mutate: bool = False) -> bool:
-        if not bool(message.get("requires_reply")):
+        expects_reply = bool(message.get("expects_reply", message.get("requires_reply")))
+        can_reply = bool(message.get("can_reply", True))
+        if not expects_reply or not can_reply:
             return False
         source_type = str(message.get("source_type", ""))
         if source_type != "world":
@@ -228,6 +410,7 @@ class StubWorld:
         if self.state.tick - received_tick <= self.world_reply_ttl_ticks:
             return True
         if mutate:
+            message["expects_reply"] = False
             message["requires_reply"] = False
         return False
 
@@ -276,8 +459,20 @@ class StubWorld:
         if not inbox_id or inbox_id in self.reply_task_by_inbox_id:
             return
 
+        can_reply = bool(message.get("can_reply", True))
+        if not can_reply:
+            return
+
         tags = list(message.get("tags", []))
         source_type = str(message.get("source_type", ""))
+        source_id = message.get("source_id")
+        if source_type == "agent":
+            if (
+                not isinstance(source_id, str)
+                or source_id not in self.state.agents
+                or source_id == agent.id
+            ):
+                return
         if not self._is_inbox_message_reply_required(message, mutate=True):
             return
 
@@ -286,8 +481,11 @@ class StubWorld:
             id=f"q{self.reply_task_seq}",
             agent_id=agent.id,
             inbox_id=inbox_id,
-            source_id=message.get("source_id"),
+            source_id=source_id if isinstance(source_id, str) else None,
             source_type=source_type,
+            thread_id=message.get("thread_id"),
+            expects_reply=bool(message.get("expects_reply", message.get("requires_reply"))),
+            can_reply=can_reply,
             text=str(message.get("text", ""))[:220],
             tags=tuple(str(tag) for tag in tags)[:8],
             created_tick=self.state.tick,
@@ -328,6 +526,9 @@ class StubWorld:
         self.reply_task_by_inbox_id = alive_map
 
     def _should_skip_reply(self, agent: AgentState, task: ReplyTask, message: dict[str, Any]) -> bool:
+        if task.source_type == "agent":
+            return False
+
         policy = self.reply_policy_by_agent.get(agent.id)
         if policy is None or not policy.can_skip:
             return False
@@ -378,9 +579,20 @@ class StubWorld:
                 self._remove_reply_task(task.inbox_id)
                 continue
 
+            source_id = message.get("source_id")
+            source_is_agent = str(message.get("source_type", "")) == "agent"
             can_say = agent.say_cooldown == 0
-            can_message = agent.message_cooldown == 0 and message.get("source_type") == "agent"
-            if not can_say and not can_message:
+            can_message = (
+                agent.message_cooldown == 0
+                and source_is_agent
+                and isinstance(source_id, str)
+                and source_id in self.state.agents
+                and source_id != agent.id
+            )
+            if source_is_agent:
+                if not can_message:
+                    continue
+            elif not can_say and not can_message:
                 continue
 
             if self._should_skip_reply(agent, task, message):
@@ -562,7 +774,7 @@ class StubWorld:
                     target_id=target_id,
                 ).strip()
                 if variant and not self._is_repetitive_dialogue(variant, recent):
-                    return variant[:280]
+                    return variant[:360]
 
         stem = candidate.rstrip(".!? ")
         if not stem:
@@ -579,16 +791,16 @@ class StubWorld:
                 fallback_variants.append(f"{stem}. {voice_line}")
         fallback_variants.extend(
             [
-                f"{stem}. Мм.",
-                f"{stem}. Угу.",
-                f"{stem}. Ну да.",
-                f"{stem}. Хм.",
+                f"{stem}. Принял, двигаюсь по этому шагу.",
+                f"{stem}. Предлагаю конкретный план и начинаю выполнять.",
+                f"{stem}. Беру задачу на себя и сообщу результат.",
+                f"{stem}. Сверяю обстановку и возвращаюсь с деталями.",
             ]
         )
         for variant in fallback_variants:
             if not self._is_repetitive_dialogue(variant, recent):
-                return variant[:280]
-        return candidate[:280]
+                return variant[:360]
+        return candidate[:360]
 
     def _event_prompt_item(self, event: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -721,13 +933,27 @@ class StubWorld:
 
         inbox_items = [
             {
+                "inbox_id": message.get("inbox_id"),
+                "thread_id": message.get("thread_id"),
+                "target_id": message.get("target_id"),
                 "source_id": message.get("source_id"),
                 "source_type": message.get("source_type"),
                 "text": str(message.get("text", ""))[:140],
                 "tags": list(message.get("tags", []))[:3],
+                "expects_reply": bool(message.get("expects_reply", message.get("requires_reply"))),
+                "can_reply": bool(message.get("can_reply", True)),
+                "directed": bool(message.get("directed", False)),
             }
             for message in agent.inbox[-self.prompt_inbox_limit :]
         ]
+
+        selected_message = self._selected_required_inbox_message(agent, reply_task=reply_task)
+        answer_first = bool(
+            selected_message is not None and self._text_has_question(str(selected_message.get("text", "")))
+        )
+        must_message_source = bool(
+            self._reply_task_requires_source_message(reply_task) and "message" in allowed_actions
+        )
 
         query = ""
         if reply_task is not None:
@@ -758,20 +984,27 @@ class StubWorld:
             "proactive_selected": proactive_selected,
             "pending_inbox_count": len(agent.inbox),
             "pending_must_reply_count": self._inbox_must_reply_count(agent, mutate_expired=False),
+            "question_allowed_now": self._can_ask_question_now(agent),
+            "question_interval_ticks": self._question_interval_for_agent(agent.id),
+            "answer_first": answer_first,
         }
         if reply_task is not None:
             queue_payload.update(
                 {
                     "task_id": reply_task.id,
                     "inbox_id": reply_task.inbox_id,
+                    "thread_id": reply_task.thread_id,
                     "source_id": reply_task.source_id,
                     "source_type": reply_task.source_type,
                     "tags": list(reply_task.tags)[:4],
                     "text": reply_task.text[:180],
+                    "expects_reply": reply_task.expects_reply,
+                    "can_reply": reply_task.can_reply,
                     "wait_ticks": self.state.tick - reply_task.created_tick,
                     "retries": reply_task.retries,
                     "skips": reply_task.skips,
                     "allow_move_instead_of_say": self._reply_task_allows_move_instead_of_text(reply_task),
+                    "must_message_source": must_message_source,
                     "reply_policy": {
                         "can_skip": self.reply_policy_by_agent.get(agent.id, ReplyPolicy(False, 0.0)).can_skip,
                         "max_skips": self.reply_queue_max_skips,
@@ -983,6 +1216,33 @@ class StubWorld:
         )
         return topics[random.randrange(len(topics))]
 
+    def _micro_world_event_text(self) -> str:
+        topics = (
+            "Вдалеке слышен странный гул.",
+            "На площади заметили новые следы.",
+            "Погода резко меняется, стало прохладнее.",
+            "У северной арки стало люднее.",
+            "На центральной улице стало тише обычного.",
+            "В районе рынка что-то обсуждают.",
+        )
+        return topics[(self.state.tick + self.state.next_event_id) % len(topics)]
+
+    def _maybe_emit_micro_world_event(self) -> None:
+        if not self.micro_world_events_enabled:
+            return
+        if self.micro_world_event_interval_ticks <= 0:
+            return
+        if (self.state.tick % self.micro_world_event_interval_ticks) != 0:
+            return
+        self._append_event(
+            source_type="world",
+            source_id=None,
+            text=self._micro_world_event_text(),
+            tags=["world", "micro"],
+            expects_reply=False,
+            can_reply=False,
+        )
+
     def _trigger_startup_world_event(self) -> None:
         if not self.startup_world_event_enabled:
             return
@@ -1053,6 +1313,9 @@ class StubWorld:
         tags: list[str],
         target_id: str | None = None,
         llm_generated: bool = False,
+        thread_id: str | None = None,
+        expects_reply: bool | None = None,
+        can_reply: bool | None = None,
     ) -> dict:
         self.state.next_event_id += 1
         normalized_tags = list(tags)
@@ -1068,6 +1331,15 @@ class StubWorld:
         }
         if target_id is not None:
             event["target_id"] = target_id
+        effective_thread_id = (thread_id or "").strip()
+        if not effective_thread_id and target_id is not None:
+            effective_thread_id = f"t{self.state.next_event_id}"
+        if effective_thread_id:
+            event["thread_id"] = effective_thread_id
+        if expects_reply is not None:
+            event["expects_reply"] = bool(expects_reply)
+        if can_reply is not None:
+            event["can_reply"] = bool(can_reply)
 
         self.state.event_log.append(event)
         self._remember_event(event["id"])
@@ -1086,17 +1358,30 @@ class StubWorld:
         source_id: str | None,
         text: str,
         tags: list[str],
+        thread_id: str | None = None,
+        expects_reply: bool | None = None,
+        can_reply: bool | None = None,
+        directed: bool = False,
     ) -> None:
         target = self.state.agents.get(target_id)
         if not target:
             return
         source_name = self._agent_name(source_id) if source_id else None
         tags_list = list(tags)
-        requires_reply = self._classify_requires_reply(source_type=source_type, tags=tags_list)
+        effective_expects_reply = (
+            self._classify_requires_reply(source_type=source_type, tags=tags_list)
+            if expects_reply is None
+            else bool(expects_reply)
+        )
+        effective_can_reply = effective_expects_reply if can_reply is None else bool(can_reply)
+        if not effective_expects_reply:
+            effective_can_reply = False
         apply_sentiment_on_receive = self._should_apply_inbox_sentiment_on_receive(source_type=source_type, tags=tags_list)
         self.inbox_seq += 1
         inbox_message = {
             "inbox_id": f"i{self.inbox_seq}",
+            "thread_id": (thread_id or "").strip() or None,
+            "target_id": target_id,
             "source_type": source_type,
             "source_id": source_id,
             "source_name": source_name,
@@ -1104,7 +1389,10 @@ class StubWorld:
             "tags": tags_list,
             "received_tick": self.state.tick,
             "penalized": False,
-            "requires_reply": requires_reply,
+            "directed": directed,
+            "expects_reply": effective_expects_reply,
+            "requires_reply": effective_expects_reply,
+            "can_reply": effective_can_reply,
             "mood_applied": not apply_sentiment_on_receive,
         }
         target.inbox.append(inbox_message)
@@ -1160,6 +1448,17 @@ class StubWorld:
             target_id=intent.target_id,
             text_kind=intent.text_kind,
         )
+        text = self._enforce_question_policy_text(
+            agent,
+            text,
+            force_non_question=intent.force_non_question,
+        )
+        directed = intent.target_id is not None
+        expects_reply = (
+            bool(intent.expects_reply)
+            if intent.expects_reply is not None
+            else directed
+        )
         event = self._append_event(
             source_type="agent",
             source_id=agent.id,
@@ -1167,6 +1466,9 @@ class StubWorld:
             tags=tags,
             target_id=intent.target_id,
             llm_generated=intent.llm_generated,
+            thread_id=intent.thread_id,
+            expects_reply=expects_reply if directed else None,
+            can_reply=True if directed else None,
         )
 
         agent.last_action = "say"
@@ -1174,6 +1476,7 @@ class StubWorld:
         agent.say_cooldown = 2
         agent.last_interaction_tick = self.state.tick
         agent.target_id = intent.target_id
+        self._mark_question_emitted(agent, text)
 
         if intent.target_id:
             self._enqueue_inbox(
@@ -1182,6 +1485,10 @@ class StubWorld:
                 source_id=agent.id,
                 text=text,
                 tags=tags,
+                thread_id=event.get("thread_id"),
+                expects_reply=expects_reply,
+                can_reply=True,
+                directed=True,
             )
         update_relations_from_event(self.state.relations, event)
         return event
@@ -1213,6 +1520,12 @@ class StubWorld:
             target_id=intent.target_id,
             text_kind=intent.text_kind,
         )
+        text = self._enforce_question_policy_text(
+            agent,
+            text,
+            force_non_question=intent.force_non_question,
+        )
+        expects_reply = bool(intent.expects_reply) if intent.expects_reply is not None else True
         event = self._append_event(
             source_type="agent",
             source_id=agent.id,
@@ -1220,6 +1533,9 @@ class StubWorld:
             tags=tags,
             target_id=intent.target_id,
             llm_generated=intent.llm_generated,
+            thread_id=intent.thread_id,
+            expects_reply=expects_reply,
+            can_reply=True,
         )
         self._enqueue_inbox(
             target_id=intent.target_id,
@@ -1227,6 +1543,10 @@ class StubWorld:
             source_id=agent.id,
             text=text,
             tags=tags,
+            thread_id=event.get("thread_id"),
+            expects_reply=expects_reply,
+            can_reply=True,
+            directed=True,
         )
 
         agent.last_action = "say"
@@ -1235,6 +1555,7 @@ class StubWorld:
         agent.say_cooldown = max(agent.say_cooldown, 1)
         agent.message_cooldown = 3
         agent.last_interaction_tick = self.state.tick
+        self._mark_question_emitted(agent, text)
         update_relations_from_event(self.state.relations, event)
         return event
 
@@ -1292,6 +1613,8 @@ class StubWorld:
                 tags=["dialogue", "llm"],
                 target_id=target_id,
                 llm_generated=True,
+                speech_intent=decision.speech_intent,
+                evidence_ids=list(decision.evidence_ids or []),
             )
 
         if decision.act == "message":
@@ -1303,19 +1626,15 @@ class StubWorld:
                 return ActionIntent(kind="idle", llm_generated=True)
 
             if not target_id or target_id not in self.state.agents or target_id == agent.id:
-                return ActionIntent(
-                    kind="say",
-                    text=text,
-                    tags=["dialogue", "llm"],
-                    target_id=None,
-                    llm_generated=True,
-                )
+                return ActionIntent(kind="idle", llm_generated=True)
             return ActionIntent(
                 kind="message",
                 text=text,
                 tags=["agent_message", "dialogue", "llm"],
                 target_id=target_id,
                 llm_generated=True,
+                speech_intent=decision.speech_intent,
+                evidence_ids=list(decision.evidence_ids or []),
             )
 
         return None
@@ -1342,8 +1661,25 @@ class StubWorld:
             relations_changed = True
         return relations_changed
 
-    def _intent_satisfies_must_answer(self, intent: ActionIntent, allow_action_reply: bool) -> bool:
+    def _intent_satisfies_must_answer(
+        self,
+        intent: ActionIntent,
+        allow_action_reply: bool,
+        reply_task: ReplyTask | None = None,
+        answer_first_required: bool = False,
+    ) -> bool:
+        if self._reply_task_requires_source_message(reply_task):
+            if intent.kind != "message":
+                return False
+            if intent.target_id != reply_task.source_id:
+                return False
+            if answer_first_required and self._text_has_question(intent.text):
+                return False
+            return True
+
         if intent.kind in {"say", "message"}:
+            if answer_first_required and self._text_has_question(intent.text):
+                return False
             return True
         if allow_action_reply and intent.kind == "move":
             return True
@@ -1394,18 +1730,12 @@ class StubWorld:
         agent.last_interaction_tick = self.state.tick
 
     def _fallback_response_intent(self, agent: AgentState, reply_task: ReplyTask | None = None) -> ActionIntent:
-        latest_message: dict[str, Any] = {}
-        if reply_task is not None:
-            found = self._find_inbox_message(agent, reply_task.inbox_id)
-            if found is not None:
-                latest_message = found
-        if not latest_message:
-            for message in reversed(agent.inbox):
-                if self._is_inbox_message_reply_required(message, mutate=False):
-                    latest_message = message
-                    break
-        if not latest_message:
-            latest_message = agent.inbox[-1] if agent.inbox else {}
+        latest_message = self._selected_required_inbox_message(agent, reply_task=reply_task) or {}
+        if not latest_message and agent.inbox:
+            latest_message = agent.inbox[-1]
+
+        thread_id = str(latest_message.get("thread_id") or "").strip() or None
+        answer_first_required = self._text_has_question(str(latest_message.get("text", "")))
         source_id = latest_message.get("source_id")
         source_type = str(latest_message.get("source_type", ""))
         source_name = latest_message.get("source_name") or self._agent_name(source_id) or "друг"
@@ -1427,6 +1757,9 @@ class StubWorld:
                 target_id=source_id,
                 text_kind="respond_agent",
                 llm_generated=False,
+                thread_id=thread_id,
+                expects_reply=True,
+                force_non_question=answer_first_required,
             )
 
         text = templates.render("respond_user", selector)
@@ -1439,6 +1772,9 @@ class StubWorld:
             tags=tags,
             text_kind="respond_user",
             llm_generated=False,
+            thread_id=thread_id,
+            expects_reply=False,
+            force_non_question=answer_first_required,
         )
 
     def _fallback_intent(
@@ -1523,9 +1859,16 @@ class StubWorld:
         return (self.state.tick % interval) == phase
 
     def _can_agent_reply_now(self, agent: AgentState, message: dict[str, Any]) -> bool:
-        if agent.say_cooldown == 0:
-            return True
-        return agent.message_cooldown == 0 and str(message.get("source_type", "")) == "agent"
+        source_is_agent = str(message.get("source_type", "")) == "agent"
+        if source_is_agent:
+            source_id = message.get("source_id")
+            return (
+                agent.message_cooldown == 0
+                and isinstance(source_id, str)
+                and source_id in self.state.agents
+                and source_id != agent.id
+            )
+        return agent.say_cooldown == 0
 
     def _can_penalize_ignored_message(
         self,
@@ -1573,6 +1916,11 @@ class StubWorld:
         periodic_unqueued_release = self._periodic_unqueued_reply_allowed(agent)
         must_answer = reply_task is not None or self._has_pending_must_reply(agent)
         allow_action_reply = self._reply_task_allows_move_instead_of_text(reply_task)
+        selected_required_message = self._selected_required_inbox_message(agent, reply_task=reply_task)
+        answer_first_required = bool(
+            selected_required_message is not None
+            and self._text_has_question(str(selected_required_message.get("text", "")))
+        )
 
         apply_ignored_inbox_penalty(
             relations=self.state.relations,
@@ -1617,7 +1965,12 @@ class StubWorld:
         if llm_decision is not None:
             llm_intent = self._intent_from_llm_decision(agent, llm_decision)
             if llm_intent is not None:
-                if must_answer and not self._intent_satisfies_must_answer(llm_intent, allow_action_reply):
+                if must_answer and not self._intent_satisfies_must_answer(
+                    llm_intent,
+                    allow_action_reply,
+                    reply_task=reply_task,
+                    answer_first_required=answer_first_required,
+                ):
                     llm_intent = None
                 else:
                     intent = llm_intent
@@ -1635,7 +1988,15 @@ class StubWorld:
                         reply_task=reply_task,
                     )
                 retry_intent = self._intent_from_llm_decision(agent, retry_decision) if retry_decision is not None else None
-                if retry_intent is not None and (not must_answer or self._intent_satisfies_must_answer(retry_intent, allow_action_reply)):
+                if retry_intent is not None and (
+                    not must_answer
+                    or self._intent_satisfies_must_answer(
+                        retry_intent,
+                        allow_action_reply,
+                        reply_task=reply_task,
+                        answer_first_required=answer_first_required,
+                    )
+                ):
                     intent = retry_intent
                     used_llm = True
                     llm_decision = retry_decision
@@ -1682,7 +2043,12 @@ class StubWorld:
 
                     if retry_intent is not None and (
                         not must_answer
-                        or self._intent_satisfies_must_answer(retry_intent, allow_action_reply)
+                        or self._intent_satisfies_must_answer(
+                            retry_intent,
+                            allow_action_reply,
+                            reply_task=reply_task,
+                            answer_first_required=answer_first_required,
+                        )
                     ):
                         intent = retry_intent
                         used_llm = True
@@ -1695,6 +2061,109 @@ class StubWorld:
                         intent = fallback_intent
                 else:
                     intent = fallback_intent
+
+        if intent is None:
+            intent = ActionIntent(kind="idle")
+
+        if selected_required_message is not None:
+            selected_thread_id = str(selected_required_message.get("thread_id") or "").strip() or None
+            if selected_thread_id and intent.thread_id is None:
+                intent.thread_id = selected_thread_id
+
+        if answer_first_required and intent.kind in {"say", "message"}:
+            intent.force_non_question = True
+
+        if self._reply_task_requires_source_message(reply_task):
+            if intent.kind != "message" or intent.target_id != reply_task.source_id:
+                fallback_intent = self._fallback_response_intent(agent, reply_task=reply_task)
+                if fallback_intent.kind == "message" and fallback_intent.target_id == reply_task.source_id:
+                    intent = fallback_intent
+                else:
+                    selector = self.state.tick * 109 + sum(ord(ch) for ch in agent.id)
+                    source_name = self._agent_name(reply_task.source_id) or "друг"
+                    intent = ActionIntent(
+                        kind="message",
+                        text=templates.render(
+                            "respond_agent",
+                            selector,
+                            target_name=source_name,
+                            topic=(agent.last_topic or "текущей ситуации")[:48],
+                        ),
+                        tags=["agent_message", "dialogue", "reply"],
+                        target_id=reply_task.source_id,
+                        text_kind="respond_agent",
+                        llm_generated=False,
+                        thread_id=reply_task.thread_id,
+                        expects_reply=True,
+                        force_non_question=answer_first_required,
+                    )
+            if reply_task is not None and reply_task.thread_id and intent.thread_id is None:
+                intent.thread_id = reply_task.thread_id
+            intent.expects_reply = True
+            if answer_first_required:
+                intent.force_non_question = True
+
+        if must_answer and intent.kind in {"say", "message"} and intent.llm_generated:
+            first_looping = self._looks_like_looping_coordination_question(intent.text)
+            substance_ok, substance_reason = self._reply_substance_ok(
+                agent=agent,
+                intent=intent,
+                source_message=selected_required_message,
+            )
+            if not substance_ok:
+                retry_reason = "no_retry"
+                accepted_retry = False
+                retry_looping = False
+                retry_decision = self._llm_decision_for_single_agent(
+                    agent.id,
+                    retries=0,
+                    reply_task=reply_task,
+                )
+                retry_intent = self._intent_from_llm_decision(agent, retry_decision) if retry_decision is not None else None
+                if retry_intent is not None and self._intent_satisfies_must_answer(
+                    retry_intent,
+                    allow_action_reply,
+                    reply_task=reply_task,
+                    answer_first_required=answer_first_required,
+                ):
+                    if selected_required_message is not None:
+                        selected_thread_id = str(selected_required_message.get("thread_id") or "").strip() or None
+                        if selected_thread_id and retry_intent.thread_id is None:
+                            retry_intent.thread_id = selected_thread_id
+                    if answer_first_required and retry_intent.kind in {"say", "message"}:
+                        retry_intent.force_non_question = True
+                    if self._reply_task_requires_source_message(reply_task):
+                        if retry_intent.kind == "message" and retry_intent.target_id == reply_task.source_id:
+                            retry_intent.expects_reply = True
+                            if reply_task.thread_id and retry_intent.thread_id is None:
+                                retry_intent.thread_id = reply_task.thread_id
+                        else:
+                            retry_intent = None
+
+                    if retry_intent is not None:
+                        retry_looping = self._looks_like_looping_coordination_question(retry_intent.text)
+                        retry_ok, retry_reason = self._reply_substance_ok(
+                            agent=agent,
+                            intent=retry_intent,
+                            source_message=selected_required_message,
+                        )
+                        if retry_ok:
+                            intent = retry_intent
+                            llm_decision = retry_decision
+                            used_llm = True
+                            if retry_decision is not None:
+                                agent.current_plan = retry_decision.goal.strip() or agent.current_plan
+                            agent.target_id = retry_intent.target_id
+                            accepted_retry = True
+
+                if not accepted_retry:
+                    if (first_looping and retry_looping) or (
+                        substance_reason == "repetitive_loop" and retry_reason == "repetitive_loop"
+                    ):
+                        intent = self._fallback_move_intent(agent, reply_task=reply_task)
+                    else:
+                        intent = self._fallback_response_intent(agent, reply_task=reply_task)
+                    used_llm = False
 
         event = self._execute_intent(agent, intent)
 
@@ -1778,6 +2247,7 @@ class StubWorld:
     def step(self) -> TickResult:
         self.state.tick += 1
         self._decrement_cooldowns()
+        self._maybe_emit_micro_world_event()
 
         self._refresh_reply_queue()
         selected_reply_tasks = self._select_reply_tasks()
@@ -1924,6 +2394,8 @@ class StubWorld:
             text=f"User -> {target.name}: {text}",
             tags=["user_message", "dialogue"],
             target_id=agent_id,
+            expects_reply=True,
+            can_reply=True,
         )
         self._enqueue_inbox(
             target_id=agent_id,
@@ -1931,6 +2403,10 @@ class StubWorld:
             source_id=None,
             text=text,
             tags=["user_message", "dialogue"],
+            thread_id=event.get("thread_id"),
+            expects_reply=True,
+            can_reply=True,
+            directed=True,
         )
 
         sentiment = text_sentiment(text)
@@ -1938,6 +2414,7 @@ class StubWorld:
         target.current_plan = "Respond to user"
         target.target_id = None
         target.last_topic = text[:60]
+        answer_first_required = self._text_has_question(text)
         reply_task = None
         if target.inbox:
             latest_inbox = target.inbox[-1]
@@ -1960,6 +2437,10 @@ class StubWorld:
             merged_tags.update({"dialogue", "reply", "user_message", "llm"})
             intent.tags = list(merged_tags)
             intent.llm_generated = True
+            intent.thread_id = event.get("thread_id")
+            intent.expects_reply = False
+            if answer_first_required:
+                intent.force_non_question = True
         else:
             selector = self.state.tick + self.state.next_event_id
             if sentiment < 0 and parse_traits(target.traits).aggression > 60:
@@ -1976,6 +2457,9 @@ class StubWorld:
                 tags=reply_tags,
                 text_kind=reply_kind,
                 llm_generated=False,
+                thread_id=event.get("thread_id"),
+                expects_reply=False,
+                force_non_question=answer_first_required,
             )
 
         target.say_cooldown = 0
@@ -1989,6 +2473,9 @@ class StubWorld:
                 text=fallback_text,
                 tags=["dialogue", "reply", "user_message"],
                 llm_generated=False,
+                thread_id=event.get("thread_id"),
+                expects_reply=False,
+                can_reply=False,
             )
             target.last_action = "say"
             target.last_say = fallback_text
