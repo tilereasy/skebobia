@@ -713,7 +713,7 @@ MonoBehaviour:
     - line: '|   cloudProjectId: 0c0d26d6-926e-4edf-9630-c319589890f8'
     - line: '|   framebufferDepthMemorylessMode: 0'
     - line: '|   qualitySettingsNames: []'
-    - line: '|   projectName: '
+    - line: '|   projectName: Skebobia Scene'
     - line: '|   organizationId: t1lereasy'
     - line: '|   cloudEnabled: 0'
     - line: '|   legacyClampBlendShapeWeights: 0'
