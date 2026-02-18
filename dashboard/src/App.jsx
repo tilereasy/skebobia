@@ -16,6 +16,15 @@ const RECENT_EVENTS_LIMIT = 10;
 const FEEDBACK_TIMEOUT = 5000;
 const GRAPH_NODE_SIZE = 8;
 const GRAPH_NODE_FONT_SIZE = 12;
+const WORLD_ANCHOR_LABELS = {
+  tracks: "у путей",
+  path: "на тропе",
+  vending_machines: "у автоматов",
+  bench: "у лавки",
+  stone_circle: "у круга камней",
+  signpost: "у указателя",
+  bushes_right: "у правых кустов",
+};
 
 const STYLES = `
   @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;900&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');
@@ -31,6 +40,7 @@ const STYLES = `
     --cyan-dim:      rgba(0,220,255,0.6);
     --green:         #00ff9d;
     --green-dim:     rgba(0,255,157,0.6);
+    --world-micro:   #7fff6b;
     --amber:         #ffb627;
     --red:           #ff3d5a;
     --text-primary:  #f0f8ff;
@@ -334,10 +344,15 @@ const STYLES = `
   .event-type-world    { border-left: 2px solid var(--green); padding-left: 12px; }
   .event-type-system   { border-left: 2px solid var(--amber); padding-left: 12px; }
   .event-type-other    { border-left: 2px solid var(--text-muted); padding-left: 12px; }
+  .event-world-micro {
+    border-left: 2px solid var(--world-micro);
+    background: linear-gradient(90deg, rgba(127,255,107,0.08), rgba(0,0,0,0) 28%);
+  }
 
   .event-meta {
     display: flex; align-items: center; gap: 8px; margin-bottom: 3px;
     font-size: 10px; color: var(--text-muted);
+    flex-wrap: wrap;
   }
   .event-time { color: var(--text-muted); }
   .event-source {
@@ -347,6 +362,24 @@ const STYLES = `
   .event-tags {
     font-size: 9px; color: var(--text-muted);
     background: rgba(0,220,255,0.06); padding: 1px 5px; border-radius: 2px;
+  }
+  .event-badge {
+    font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    border: 1px solid transparent; border-radius: 2px;
+    padding: 1px 5px;
+  }
+  .event-badge-world {
+    color: var(--world-micro);
+    border-color: rgba(127,255,107,0.45);
+    background: rgba(127,255,107,0.1);
+  }
+  .event-anchor {
+    font-size: 10px;
+    color: #d4ffbf;
+    border: 1px solid rgba(127,255,107,0.35);
+    background: rgba(127,255,107,0.08);
+    border-radius: 2px;
+    padding: 1px 6px;
   }
   .event-item p {
     color: #ffffff !important;
@@ -688,8 +721,31 @@ function fallbackNodeColor(id) {
 
 function moodClass(moodLabel) { return `mood mood-${moodLabel || "neutral"}`; }
 
+function hasTag(event, expectedTag) {
+  if (!event || !Array.isArray(event.tags)) return false;
+  const needle = String(expectedTag || "").toLowerCase();
+  return event.tags.some((tag) => String(tag || "").toLowerCase() === needle);
+}
+
+function extractEventAnchor(event) {
+  if (event && typeof event.anchor === "string" && event.anchor) return event.anchor;
+  if (!event || !Array.isArray(event.tags)) return "";
+  const anchorTag = event.tags.find((tag) => typeof tag === "string" && tag.startsWith("anchor:"));
+  return anchorTag ? String(anchorTag).split(":", 2)[1] : "";
+}
+
+function anchorLabel(anchor) {
+  if (!anchor) return "";
+  return WORLD_ANCHOR_LABELS[anchor] || anchor.replaceAll("_", " ");
+}
+
+function isWorldMicroEvent(event) {
+  return hasTag(event, "world") && hasTag(event, "micro");
+}
+
 function sourceLabel(event, agentById) {
   if (event.source_id && agentById.has(event.source_id)) return agentById.get(event.source_id).name;
+  if (isWorldMicroEvent(event)) return "World Micro";
   if (event.source_type === "world") return "World";
   return "Unknown";
 }
@@ -970,11 +1026,15 @@ export default function App() {
               {filteredEvents.length === 0 && <div className="empty-state">No events match filters</div>}
               {filteredEvents.map((event) => {
                 const type = getEventType(event);
+                const worldMicro = isWorldMicroEvent(event);
+                const anchor = extractEventAnchor(event);
                 return (
-                  <article key={event.id} className={`event-item event-type-${type}`}>
+                  <article key={event.id} className={`event-item event-type-${type}${worldMicro ? " event-world-micro" : ""}`}>
                     <div className="event-meta">
                       <span className="event-time">{event.ts || "—"}</span>
                       <span className="event-source">{sourceLabel(event, agentById)}</span>
+                      {worldMicro && <span className="event-badge event-badge-world">world micro</span>}
+                      {anchor && <span className="event-anchor">{anchorLabel(anchor)}</span>}
                       {Array.isArray(event.tags) && event.tags.length > 0 && (
                         <span className="event-tags">{event.tags.join(", ")}</span>
                       )}

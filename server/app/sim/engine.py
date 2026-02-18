@@ -16,6 +16,7 @@ from app.sim.llm_decider import AgentDecision, LLMTickDecider
 from app.sim.movement import SAFE_POINT, pick_wander_target, step_towards
 from app.sim.relations import apply_ignored_inbox_penalty, clamp as clamp_relation, update_relations_from_event
 from app.sim.rules import parse_traits, pick_best_friend, text_sentiment
+from app.sim.world_events import GeneratedWorldEvent, WorldEventGenerator
 
 
 def _utc_iso() -> str:
@@ -169,8 +170,8 @@ class StubWorld:
             1,
             240,
         )
-        self.micro_world_events_enabled = _env_bool("MICRO_WORLD_EVENTS_ENABLED", True)
-        self.micro_world_event_interval_ticks = _env_int("MICRO_WORLD_EVENT_INTERVAL_TICKS", 9, 3, 240)
+        self.world_event_generator = WorldEventGenerator.from_env(client=self.llm_decider.client)
+        self.world_events_logger = logging.getLogger("app.sim.world_events")
 
         self.reply_policy_by_agent: dict[str, ReplyPolicy] = {}
         for agent in agents.values():
@@ -244,6 +245,40 @@ class StubWorld:
     @staticmethod
     def _word_count(text: str) -> int:
         return sum(1 for token in str(text).split() if any(ch.isalpha() for ch in token))
+
+    @staticmethod
+    def _contains_operational_tone(text: str) -> bool:
+        lowered = str(text).lower()
+        blocked_markers = (
+            "принял",
+            "задача",
+            "синхронизировать шаги",
+            "синхрониз",
+            "уточню факт",
+            "вернусь с результат",
+        )
+        return any(marker in lowered for marker in blocked_markers)
+
+    @staticmethod
+    def _has_first_person_marker(text: str) -> bool:
+        lowered = f" {str(text).lower()} "
+        markers = (" я ", " мне ", " меня ", " мой ", " моя ", " мое ", " моё ", " мы ", " нам ", " нас ")
+        return any(marker in lowered for marker in markers)
+
+    def _is_third_person_self_reference(self, agent: AgentState, text: str) -> bool:
+        lowered = str(text).lower()
+        name_marker = agent.name.lower()
+        if not name_marker or name_marker not in lowered:
+            return False
+        if self._has_first_person_marker(text):
+            return False
+        return True
+
+    def _internal_impulse_20pct(self, agent: AgentState) -> bool:
+        if agent.inbox:
+            return False
+        seed = self.state.tick * 97 + sum(ord(ch) for ch in agent.id) * 31
+        return (seed % 100) < 20
 
     @staticmethod
     def _has_action_or_proposal(text: str) -> bool:
@@ -656,7 +691,19 @@ class StubWorld:
                 "max_replies_per_tick": self.max_replies_per_tick,
                 "proactive_agents_per_tick": self.proactive_llm_agents_per_tick,
             },
+            "world_events": {
+                "enabled": self.world_event_generator.enabled,
+                "anchors": list(self.world_event_generator.anchors),
+                "last_should_emit_reason": self.world_event_generator.last_should_emit_reason,
+                "last_reject_reason": self.world_event_generator.last_reject_reason,
+            },
         }
+
+    def _world_event_stats_payload(self) -> dict[str, Any]:
+        return self.world_event_generator.metrics(
+            tick=self.state.tick,
+            events=list(self.state.event_log),
+        )
 
     def _normalize_dialogue_text(self, text: str) -> str:
         lowered = text.lower()
@@ -791,10 +838,10 @@ class StubWorld:
                 fallback_variants.append(f"{stem}. {voice_line}")
         fallback_variants.extend(
             [
-                f"{stem}. Принял, двигаюсь по этому шагу.",
-                f"{stem}. Предлагаю конкретный план и начинаю выполнять.",
-                f"{stem}. Беру задачу на себя и сообщу результат.",
-                f"{stem}. Сверяю обстановку и возвращаюсь с деталями.",
+                f"{stem}. Я до сих пор чувствую тревогу от этого.",
+                f"{stem}. Я заметил это и не могу выбросить из головы.",
+                f"{stem}. Мне это не нравится, здесь что-то не так.",
+                f"{stem}. Странное чувство, будто сейчас случится что-то ещё.",
             ]
         )
         for variant in fallback_variants:
@@ -803,7 +850,7 @@ class StubWorld:
         return candidate[:360]
 
     def _event_prompt_item(self, event: dict[str, Any]) -> dict[str, Any]:
-        return {
+        payload = {
             "id": event.get("id"),
             "source_id": event.get("source_id"),
             "target_id": event.get("target_id"),
@@ -811,6 +858,15 @@ class StubWorld:
             "tags": list(event.get("tags", []))[:4],
             "tick": event.get("tick"),
         }
+        if "anchor" in event:
+            payload["anchor"] = event.get("anchor")
+        if "severity" in event:
+            payload["severity"] = event.get("severity")
+        if "importance" in event:
+            payload["importance"] = event.get("importance")
+        if "evidence_ids" in event:
+            payload["evidence_ids"] = list(event.get("evidence_ids", []))[:3]
+        return payload
 
     def _reply_task_allows_move_instead_of_text(self, reply_task: ReplyTask | None) -> bool:
         if reply_task is None:
@@ -987,6 +1043,7 @@ class StubWorld:
             "question_allowed_now": self._can_ask_question_now(agent),
             "question_interval_ticks": self._question_interval_for_agent(agent.id),
             "answer_first": answer_first,
+            "internal_impulse_20pct": self._internal_impulse_20pct(agent),
         }
         if reply_task is not None:
             queue_payload.update(
@@ -1014,6 +1071,9 @@ class StubWorld:
 
         return {
             "agent_id": agent.id,
+            "traits": agent.traits,
+            "mood": agent.mood,
+            "mood_label": agent.mood_label,
             "state": {
                 "mood": agent.mood,
                 "mood_label": agent.mood_label,
@@ -1216,37 +1276,36 @@ class StubWorld:
         )
         return topics[random.randrange(len(topics))]
 
-    def _micro_world_event_text(self) -> str:
-        topics = (
-            "Вдалеке слышен странный гул.",
-            "На площади заметили новые следы.",
-            "Погода резко меняется, стало прохладнее.",
-            "У северной арки стало люднее.",
-            "На центральной улице стало тише обычного.",
-            "В районе рынка что-то обсуждают.",
-        )
-        return topics[(self.state.tick + self.state.next_event_id) % len(topics)]
-
-    def _maybe_emit_micro_world_event(self) -> None:
-        if not self.micro_world_events_enabled:
-            return
-        if self.micro_world_event_interval_ticks <= 0:
-            return
-        if (self.state.tick % self.micro_world_event_interval_ticks) != 0:
-            return
-        self._append_event(
-            source_type="world",
-            source_id=None,
-            text=self._micro_world_event_text(),
-            tags=["world", "micro"],
-            expects_reply=False,
-            can_reply=False,
-        )
-
     def _trigger_startup_world_event(self) -> None:
         if not self.startup_world_event_enabled:
             return
         if not self.state.agents:
+            return
+
+        generated_startup = self.world_event_generator.generate(
+            tick=self.state.tick,
+            events=list(self.state.event_log),
+            agents=self._world_event_agents_snapshot(),
+            reply_queue_pending=len(self.reply_queue),
+        )
+        if generated_startup is not None:
+            self.add_world_event(
+                text=generated_startup.text,
+                importance=generated_startup.importance,
+                emit_immediate_reactions=False,
+                extra_tags=generated_startup.tags,
+                anchor=generated_startup.anchor,
+                severity=generated_startup.severity,
+                ensure_agent_reaction=False,
+            )
+            self.world_events_logger.warning(
+                "startup_world_event_emit tick=%s anchor=%s severity=%s importance=%.2f text=%s",
+                self.state.tick,
+                generated_startup.anchor,
+                generated_startup.severity,
+                generated_startup.importance,
+                generated_startup.text,
+            )
             return
 
         self.add_world_event(
@@ -1287,11 +1346,14 @@ class StubWorld:
             return
 
         importance = 0.45
-        if "important" in tags:
-            importance += 0.3
-        if "user_message" in tags:
-            importance += 0.2
-        importance = _clamp_float(importance, 0.0, 1.0)
+        if isinstance(event.get("importance"), (int, float)):
+            importance = _clamp_float(float(event.get("importance", 0.45)), 0.0, 1.0)
+        else:
+            if "important" in tags:
+                importance += 0.3
+            if "user_message" in tags:
+                importance += 0.2
+            importance = _clamp_float(importance, 0.0, 1.0)
 
         for agent_id in participants:
             self.memory_store.remember(
@@ -1316,6 +1378,10 @@ class StubWorld:
         thread_id: str | None = None,
         expects_reply: bool | None = None,
         can_reply: bool | None = None,
+        importance: float | None = None,
+        anchor: str | None = None,
+        severity: str | None = None,
+        evidence_ids: list[str] | None = None,
     ) -> dict:
         self.state.next_event_id += 1
         normalized_tags = list(tags)
@@ -1340,10 +1406,36 @@ class StubWorld:
             event["expects_reply"] = bool(expects_reply)
         if can_reply is not None:
             event["can_reply"] = bool(can_reply)
+        if importance is not None:
+            event["importance"] = _clamp_float(float(importance), 0.0, 1.0)
+        if anchor:
+            event["anchor"] = str(anchor)
+        if severity:
+            event["severity"] = str(severity)
+        if evidence_ids:
+            normalized_evidence_ids: list[str] = []
+            seen: set[str] = set()
+            for item in evidence_ids:
+                if not isinstance(item, str):
+                    continue
+                cleaned = item.strip()
+                if not cleaned:
+                    continue
+                lowered = cleaned.casefold()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                normalized_evidence_ids.append(cleaned[:64])
+                if len(normalized_evidence_ids) >= 3:
+                    break
+            if normalized_evidence_ids:
+                event["evidence_ids"] = normalized_evidence_ids
 
         self.state.event_log.append(event)
         self._remember_event(event["id"])
         self._remember_event_in_store(event)
+        if source_type == "world":
+            self.world_event_generator.observe_world_event(event)
 
         if source_type == "agent" and ({"dialogue", "reply", "agent_message"} & set(normalized_tags)):
             is_llm = llm_generated or ("llm" in normalized_tags)
@@ -1362,10 +1454,10 @@ class StubWorld:
         expects_reply: bool | None = None,
         can_reply: bool | None = None,
         directed: bool = False,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         target = self.state.agents.get(target_id)
         if not target:
-            return
+            return None
         source_name = self._agent_name(source_id) if source_id else None
         tags_list = list(tags)
         effective_expects_reply = (
@@ -1399,6 +1491,7 @@ class StubWorld:
         if apply_sentiment_on_receive:
             self._apply_inbox_sentiment_once(target, inbox_message, multiplier=3)
         self._queue_reply_task(target, inbox_message)
+        return inbox_message
 
     def _decrement_cooldowns(self) -> None:
         for agent in self._ordered_agents():
@@ -1469,6 +1562,7 @@ class StubWorld:
             thread_id=intent.thread_id,
             expects_reply=expects_reply if directed else None,
             can_reply=True if directed else None,
+            evidence_ids=list(intent.evidence_ids or []),
         )
 
         agent.last_action = "say"
@@ -1536,6 +1630,7 @@ class StubWorld:
             thread_id=intent.thread_id,
             expects_reply=expects_reply,
             can_reply=True,
+            evidence_ids=list(intent.evidence_ids or []),
         )
         self._enqueue_inbox(
             target_id=intent.target_id,
@@ -1598,6 +1693,10 @@ class StubWorld:
             text = (decision.say_text or "").strip()
             if not text:
                 return ActionIntent(kind="idle", llm_generated=True)
+            if self._contains_operational_tone(text):
+                return None
+            if self._is_third_person_self_reference(agent, text):
+                return None
 
             target_id: str | None = None
             if (
@@ -1624,6 +1723,10 @@ class StubWorld:
             text = (decision.say_text or "").strip()
             if not text:
                 return ActionIntent(kind="idle", llm_generated=True)
+            if self._contains_operational_tone(text):
+                return None
+            if self._is_third_person_self_reference(agent, text):
+                return None
 
             if not target_id or target_id not in self.state.agents or target_id == agent.id:
                 return ActionIntent(kind="idle", llm_generated=True)
@@ -2244,10 +2347,81 @@ class StubWorld:
 
         return reactions
 
+    def _world_event_agents_snapshot(self) -> list[dict[str, Any]]:
+        snapshot: list[dict[str, Any]] = []
+        for agent in self._ordered_agents():
+            snapshot.append(
+                {
+                    "id": agent.id,
+                    "name": agent.name,
+                    "traits": agent.traits,
+                    "mood": agent.mood,
+                    "mood_label": agent.mood_label,
+                    "pos": {"x": round(agent.pos.x, 2), "z": round(agent.pos.z, 2)},
+                }
+            )
+        return snapshot
+
+    def _pick_world_reaction_agent(self, inbox_by_agent: dict[str, dict[str, Any]]) -> tuple[AgentState, dict[str, Any]] | None:
+        candidates: list[tuple[tuple[int, int, str], AgentState, dict[str, Any]]] = []
+        for agent_id, inbox_message in inbox_by_agent.items():
+            agent = self.state.agents.get(agent_id)
+            if agent is None:
+                continue
+            pending_must_reply = self._inbox_must_reply_count(agent, mutate_expired=False)
+            cooldown_sum = agent.say_cooldown + agent.message_cooldown
+            rank = (pending_must_reply, cooldown_sum, agent.id)
+            candidates.append((rank, agent, inbox_message))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        _rank, selected_agent, selected_message = candidates[0]
+        return selected_agent, selected_message
+
+    def _maybe_emit_generated_world_event(self) -> tuple[dict, list[dict]] | None:
+        events_snapshot = list(self.state.event_log)
+        agents_snapshot = self._world_event_agents_snapshot()
+        pending = len(self.reply_queue)
+        if not self.world_event_generator.should_emit(
+            tick=self.state.tick,
+            events=events_snapshot,
+            agents=agents_snapshot,
+            reply_queue_pending=pending,
+        ):
+            return None
+
+        generated: GeneratedWorldEvent | None = self.world_event_generator.generate(
+            tick=self.state.tick,
+            events=events_snapshot,
+            agents=agents_snapshot,
+            reply_queue_pending=pending,
+        )
+        if generated is None:
+            return None
+
+        event, reactions = self.add_world_event(
+            text=generated.text,
+            importance=generated.importance,
+            emit_immediate_reactions=False,
+            extra_tags=generated.tags,
+            anchor=generated.anchor,
+            severity=generated.severity,
+            ensure_agent_reaction=True,
+        )
+        self.world_events_logger.warning(
+            "world_event_emit tick=%s anchor=%s severity=%s importance=%.2f text=%s",
+            self.state.tick,
+            generated.anchor,
+            generated.severity,
+            generated.importance,
+            generated.text,
+        )
+        return event, reactions
+
     def step(self) -> TickResult:
         self.state.tick += 1
         self._decrement_cooldowns()
-        self._maybe_emit_micro_world_event()
 
         self._refresh_reply_queue()
         selected_reply_tasks = self._select_reply_tasks()
@@ -2287,6 +2461,12 @@ class StubWorld:
             events.extend(agent_events)
             llm_relations_changed = llm_relations_changed or agent_relations_changed
 
+        generated_world = self._maybe_emit_generated_world_event()
+        if generated_world is not None:
+            world_event, world_reactions = generated_world
+            events.append(world_event)
+            events.extend(world_reactions)
+
         relations_changed = llm_relations_changed or any(event.get("target_id") is not None for event in events)
         relations_changed = relations_changed or (self.state.tick % self.relations_interval_ticks == 0)
         if relations_changed:
@@ -2322,6 +2502,7 @@ class StubWorld:
             "relations": self.relations_payload(),
             "events": list(self.state.event_log)[-200:],
             "llm_stats": self._llm_stats_payload(),
+            "world_event_stats": self._world_event_stats_payload(),
             "memory_stats": self.memory_store.stats(),
         }
 
@@ -2354,31 +2535,77 @@ class StubWorld:
         text: str,
         importance: float | None = None,
         emit_immediate_reactions: bool = True,
+        extra_tags: list[str] | None = None,
+        anchor: str | None = None,
+        severity: str | None = None,
+        ensure_agent_reaction: bool = False,
     ) -> tuple[dict, list[dict]]:
-        tags = ["world"]
-        if importance is not None and importance >= 0.7:
-            tags.append("important")
+        normalized_importance = None
+        if importance is not None:
+            normalized_importance = _clamp_float(float(importance), 0.0, 1.0)
 
-        event = self._append_event(source_type="world", source_id=None, text=text, tags=tags)
+        normalized_tags: list[str] = ["world"]
+        if extra_tags:
+            normalized_tags.extend(str(tag).strip().lower() for tag in extra_tags if str(tag).strip())
+        if anchor:
+            normalized_tags.append(f"anchor:{anchor}")
+        if severity:
+            normalized_tags.append(str(severity).strip().lower())
+        if normalized_importance is not None and normalized_importance >= 0.7:
+            normalized_tags.append("important")
+        if str(severity).strip().lower() == "danger":
+            normalized_tags.append("important")
+
+        deduped_tags: list[str] = []
+        seen_tags: set[str] = set()
+        for tag in normalized_tags:
+            if tag in seen_tags:
+                continue
+            seen_tags.add(tag)
+            deduped_tags.append(tag)
+        if "world" not in seen_tags:
+            deduped_tags.insert(0, "world")
+
+        event = self._append_event(
+            source_type="world",
+            source_id=None,
+            text=text,
+            tags=deduped_tags,
+            importance=normalized_importance,
+            anchor=anchor,
+            severity=severity,
+        )
         sentiment = text_sentiment(text)
-        intensity = max(1, int(round((importance if importance is not None else 0.5) * 10)))
+        intensity = max(1, int(round((normalized_importance if normalized_importance is not None else 0.5) * 10)))
         mood_shift = sentiment * max(2, intensity // 2)
+        inbox_by_agent: dict[str, dict[str, Any]] = {}
 
         for idx, agent in enumerate(self._ordered_agents()):
             spread = idx if mood_shift < 0 else -idx
             agent.mood = _clamp_int(agent.mood + mood_shift + spread, -100, 100)
             agent.last_topic = text[:60]
-            self._enqueue_inbox(
+            inbox_message = self._enqueue_inbox(
                 target_id=agent.id,
                 source_type="world",
                 source_id=None,
                 text=text,
-                tags=tags,
+                tags=deduped_tags,
             )
+            if inbox_message is not None:
+                inbox_by_agent[agent.id] = inbox_message
+
+        if ensure_agent_reaction and inbox_by_agent:
+            selected = self._pick_world_reaction_agent(inbox_by_agent)
+            if selected is not None:
+                selected_agent, selected_message = selected
+                selected_message["expects_reply"] = True
+                selected_message["requires_reply"] = True
+                selected_message["can_reply"] = True
+                self._queue_reply_task(selected_agent, selected_message)
 
         reactions: list[dict] = []
         if emit_immediate_reactions:
-            reaction_count = 2 if (importance is not None and importance >= 0.8) else 1 + (sum(ord(ch) for ch in text) % 2)
+            reaction_count = 2 if (normalized_importance is not None and normalized_importance >= 0.8) else 1 + (sum(ord(ch) for ch in text) % 2)
             reaction_count = _clamp_int(reaction_count, 1, 2)
             reactions = self._immediate_world_reactions(text=text, sentiment=sentiment, count=reaction_count)
         return event, reactions
@@ -2532,4 +2759,5 @@ class StubWorld:
             "key_memories": key_memories,
             "recent_events": recent_events,
             "llm_stats": self._llm_stats_payload(),
+            "world_event_stats": self._world_event_stats_payload(),
         }

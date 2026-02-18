@@ -681,7 +681,11 @@ class LLMTickDecider:
             "Actions must keep social coherence and avoid pointless isolation.\n"
             "Primary dialogue language is Russian unless incoming context is clearly another language.\n"
             "Use each agent's mood, traits and recent context to create distinct voice per agent.\n"
+            "Agents must speak in first person. Never describe themselves in third person.\n"
             "Avoid generic assistant boilerplate (e.g. 'I'm here for you').\n"
+            "Avoid bureaucratic or project-management tone.\n"
+            "Do not say: 'принял', 'задача', 'синхронизировать шаги', 'уточню факт', 'вернусь с результатом'.\n"
+            "Speak like a person in a park, not a team lead.\n"
             "Do not mirror or copy recent messages verbatim; rephrase with new wording.\n"
             "say_text must reference a concrete context signal (topic, inbox item, relation, or world event).\n"
             "One-word replies are forbidden.\n"
@@ -699,8 +703,15 @@ class LLMTickDecider:
             "When queue.selected_for_reply is true and queue.reply_policy.can_skip is false, avoid idle.\n"
             "When queue.selected_for_reply is true and queue.reply_policy.can_skip is true, idle is allowed rarely.\n"
             "If dialogue is allowed for multiple agents, keep the configured minimum share as say/message.\n"
+            "If speaking, prefer: expressing emotion, making observation, revealing personal thought.\n"
+            "Avoid: talking about communication process itself.\n"
+            "Avoid: talking about 'steps' without a concrete object.\n"
+            "If queue.pending_inbox_count is 0 and queue.internal_impulse_20pct is true, prefer a short say/message tied to world or personal interest.\n"
             "If state.last_action was 'move', prefer continuing the same move target and avoid coordinate jitter.\n"
             "Use evidence_ids to reference up to 3 relevant ids from recent_events/inbox/memories_top when possible.\n"
+            "If world.recent_events contains a world+micro event, at least one eligible agent should react via say/message.\n"
+            "When reacting to world+micro, include that world event id in evidence_ids whenever relevant.\n"
+            "When say/message give grounded sensory details, feelings, or concrete observations.\n"
             "\n"
             "Format:\n"
             "{\n"
@@ -736,6 +747,7 @@ class LLMTickDecider:
         world_action_reply_selected = 0
         answer_first_selected = 0
         question_blocked_agents = 0
+        impulse_agents_without_inbox = 0
         for agent_ctx in agents_context:
             if not isinstance(agent_ctx, dict):
                 continue
@@ -745,6 +757,11 @@ class LLMTickDecider:
             queue = agent_ctx.get("queue")
             if not isinstance(queue, dict):
                 continue
+            if (
+                bool(queue.get("internal_impulse_20pct"))
+                and int(queue.get("pending_inbox_count", 0)) == 0
+            ):
+                impulse_agents_without_inbox += 1
             if bool(queue.get("answer_first")) or queue.get("question_allowed_now") is False:
                 question_blocked_agents += 1
             if queue.get("selected_for_reply") is not True:
@@ -777,6 +794,36 @@ class LLMTickDecider:
         else:
             min_dialogue_actions = 0 if dialogue_capable == 0 else max(1, dialogue_capable // 2)
 
+        recent_world_micro_event_ids: list[str] = []
+        world_recent_events = world_summary.get("recent_events")
+        if isinstance(world_recent_events, list):
+            for event in reversed(world_recent_events):
+                if not isinstance(event, dict):
+                    continue
+                tags = event.get("tags")
+                if not isinstance(tags, list):
+                    continue
+                normalized_tags = {str(tag).lower() for tag in tags}
+                if "world" not in normalized_tags or "micro" not in normalized_tags:
+                    continue
+                event_id = event.get("id")
+                if isinstance(event_id, str) and event_id.strip():
+                    recent_world_micro_event_ids.append(event_id.strip())
+                    if len(recent_world_micro_event_ids) >= 4:
+                        break
+
+        if recent_world_micro_event_ids and dialogue_capable > 0:
+            # Micro-bonus: if world/micro just happened, nudge at least one extra dialogue action.
+            min_dialogue_actions = max(
+                min_dialogue_actions,
+                min(dialogue_capable, min_dialogue_actions + 1),
+            )
+        if impulse_agents_without_inbox > 0 and dialogue_capable > 0:
+            min_dialogue_actions = min(
+                dialogue_capable,
+                min_dialogue_actions + impulse_agents_without_inbox,
+            )
+
         return {
             "task": "Return one decision per expected_agent_ids entry for the current tick.",
             "tick": tick,
@@ -788,6 +835,9 @@ class LLMTickDecider:
                 "must_sound_in_world": True,
                 "avoid_verbatim_repeat": True,
                 "avoid_generic_assistant_tone": True,
+                "first_person_only": True,
+                "avoid_process_talk": True,
+                "prefer_react_to_world_micro": bool(recent_world_micro_event_ids),
             },
             "hard_limits": {
                 "decisions_count_must_match_agents_input": True,
@@ -805,9 +855,20 @@ class LLMTickDecider:
                 "selected_reply_answer_first_agents": answer_first_selected,
                 "selected_reply_must_message_agents": must_message_selected,
                 "selected_reply_agents_allowing_move_action": world_action_reply_selected,
+                "recent_world_micro_event_ids": recent_world_micro_event_ids,
+                "prefer_world_micro_reaction": bool(recent_world_micro_event_ids),
+                "impulse_agents_without_inbox": impulse_agents_without_inbox,
+                "internal_impulse_probability_if_no_inbox": 0.2,
                 "max_question_actions_for_tick": max(0, len(expected_agent_ids) - question_blocked_agents),
-                "max_idle_in_selected_queue": 0 if selected_for_reply == 0 else (selected_for_reply - min_dialogue_actions),
+                "max_idle_in_selected_queue": 0 if selected_for_reply == 0 else max(0, selected_for_reply - min_dialogue_actions),
                 "response_should_be_minified_json_single_line": True,
                 "allowed_act_values": ["move", "say", "message", "idle"],
+                "forbidden_phrases": [
+                    "принял",
+                    "задача",
+                    "синхронизировать шаги",
+                    "уточню факт",
+                    "вернусь с результатом",
+                ],
             },
         }
