@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 
 def clamp(value: int, low: int = -100, high: int = 100) -> int:
     return max(low, min(high, value))
@@ -40,12 +41,15 @@ def apply_ignored_inbox_penalty(
     owner_agent_id: str,
     now_tick: int,
     ignore_after_ticks: int = 5,
+    can_penalize: Callable[[dict], bool] | None = None,
 ) -> None:
     for message in inbox:
         source_id = message.get("source_id")
         if not source_id or source_id == owner_agent_id:
             continue
         if message.get("penalized"):
+            continue
+        if can_penalize is not None and not can_penalize(message):
             continue
         received_tick = int(message.get("received_tick", now_tick))
         if now_tick - received_tick < ignore_after_ticks:
