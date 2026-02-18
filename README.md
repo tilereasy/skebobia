@@ -13,7 +13,7 @@
 * [Kwerdu](https://github.com/Kwerd-u)
 * [Zama47](https://github.com/Zama47)
 * [tilereasy](https://github.com/tilereasy)
-* [alexeydarkness] (https://github.com/alexeydarkness)
+* [alexeydarkness](https://github.com/alexeydarkness)
 
 
 **Проект разрабатывался в ограниченные сроки как proof‑of‑concept**.
