@@ -95,10 +95,11 @@ async def tick_loop() -> None:
     while True:
         await asyncio.sleep(max(0.1, TICK_INTERVAL_SEC) / max(world.speed, 0.1))
 
+        before_event_id = world.world_state.next_event_id
         result = world.step()
         await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
 
-        for event in result.events:
+        for event in world.events_since(before_event_id):
             await hub.broadcast({"type": "event", "payload": event})
         if result.relations_changed:
             await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
@@ -156,10 +157,10 @@ async def events(
 
 @app.post("/api/control/event")
 async def control_event(payload: ControlEventIn) -> dict:
+    before_event_id = world.world_state.next_event_id
     event, reactions = world.add_world_event(payload.text, payload.importance)
-    await hub.broadcast({"type": "event", "payload": event})
-    for reaction in reactions:
-        await hub.broadcast({"type": "event", "payload": reaction})
+    for emitted_event in world.events_since(before_event_id):
+        await hub.broadcast({"type": "event", "payload": emitted_event})
     await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
     await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
     return {"event_id": event["id"], "reaction_event_ids": [reaction["id"] for reaction in reactions]}
@@ -167,12 +168,13 @@ async def control_event(payload: ControlEventIn) -> dict:
 
 @app.post("/api/control/message")
 async def control_message(payload: ControlMessageIn) -> dict:
+    before_event_id = world.world_state.next_event_id
     try:
         event, reply = world.add_agent_message(payload.agent_id, payload.text)
     except KeyError:
         raise HTTPException(status_code=404, detail="agent not found") from None
-    await hub.broadcast({"type": "event", "payload": event})
-    await hub.broadcast({"type": "event", "payload": reply})
+    for emitted_event in world.events_since(before_event_id):
+        await hub.broadcast({"type": "event", "payload": emitted_event})
     await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
     await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
     return {"accepted": True, "reply_event_id": reply["id"]}

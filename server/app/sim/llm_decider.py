@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -41,6 +41,7 @@ class AgentDecision(BaseModel):
     target_id: str | None = Field(default=None, max_length=64)
     say_text: str | None = Field(default=None, max_length=280)
     move_to: MoveTo | None = None
+    evidence_ids: list[str] | None = Field(default=None, max_length=3)
     deltas: DecisionDeltas | None = None
 
     @model_validator(mode="after")
@@ -58,6 +59,24 @@ class AgentDecision(BaseModel):
                 self.say_text = None
             else:
                 self.say_text = say_text[:280]
+
+        if self.evidence_ids is not None:
+            normalized_evidence_ids: list[str] = []
+            seen: set[str] = set()
+            for item in self.evidence_ids:
+                if not isinstance(item, str):
+                    continue
+                cleaned = item.strip()
+                if not cleaned or cleaned.lower() in {"null", "none", "nil", "n/a"}:
+                    continue
+                key = cleaned.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                normalized_evidence_ids.append(cleaned[:64])
+                if len(normalized_evidence_ids) >= 3:
+                    break
+            self.evidence_ids = normalized_evidence_ids or None
 
         if self.act == "message" and not self.target_id:
             self.act = "say"
@@ -85,6 +104,7 @@ class LLMTickDecider:
     temperature: float = 0.2
     max_agents_per_tick: int = 4
     strict_schema_validation: bool = False
+    trace_callback: Callable[[dict[str, Any]], None] | None = None
 
     @classmethod
     def from_env(cls) -> "LLMTickDecider":
@@ -125,6 +145,14 @@ class LLMTickDecider:
         if self._debug_enabled():
             logging.getLogger("app.sim.llm_decider").warning(message)
 
+    def _emit_trace(self, payload: dict[str, Any]) -> None:
+        if self.trace_callback is None:
+            return
+        try:
+            self.trace_callback(payload)
+        except Exception as exc:
+            self._debug(f"LLM decider trace callback failed: {exc!r}")
+
     def decide(
         self,
         tick: int,
@@ -137,17 +165,30 @@ class LLMTickDecider:
 
         minimum_output_tokens = 220 + max(0, len(expected_agent_ids) - 1) * 140
         minimum_output_tokens = max(220, min(minimum_output_tokens, 2600))
+        system_prompt = self._system_prompt()
+        user_payload = self._user_payload(
+            tick=tick,
+            world_summary=world_summary,
+            agents_context=agents_context,
+            expected_agent_ids=expected_agent_ids,
+        )
         response_obj = self.client.request_json_object(
-            system_prompt=self._system_prompt(),
-            user_payload=self._user_payload(
-                tick=tick,
-                world_summary=world_summary,
-                agents_context=agents_context,
-                expected_agent_ids=expected_agent_ids,
-            ),
+            system_prompt=system_prompt,
+            user_payload=user_payload,
             temperature=self.temperature,
             json_schema=TickDecisionEnvelope.model_json_schema(),
             minimum_output_tokens=minimum_output_tokens,
+        )
+        self._emit_trace(
+            {
+                "tick": tick,
+                "expected_agent_ids": list(expected_agent_ids),
+                "prompt": {
+                    "system_prompt": system_prompt,
+                    "user_payload": user_payload,
+                },
+                "response": response_obj,
+            }
         )
         if not response_obj:
             self._debug("LLM decider got empty/invalid JSON object from client")
@@ -362,6 +403,11 @@ class LLMTickDecider:
                 "message",
                 "move_to",
                 "destination",
+                "evidence_ids",
+                "evidenceIds",
+                "evidence",
+                "support_ids",
+                "supportIds",
                 "deltas",
                 "delta",
             }
@@ -404,6 +450,7 @@ class LLMTickDecider:
             ("say_text", "sayText", "text", "message", "utterance", "speech", "content", "reply"),
         )
         move_to = self._extract_move_to(candidate)
+        evidence_ids = self._extract_evidence_ids(candidate)
         deltas = self._extract_deltas(candidate)
 
         if act in {"say", "message"} and say_text:
@@ -420,6 +467,7 @@ class LLMTickDecider:
             "target_id": target_id[:64] if target_id else None,
             "say_text": say_text,
             "move_to": move_to,
+            "evidence_ids": evidence_ids,
             "deltas": deltas,
         }
 
@@ -515,6 +563,36 @@ class LLMTickDecider:
             return None
         return {"self_mood": self_mood, "relations": relations}
 
+    def _extract_evidence_ids(self, payload: Mapping[str, Any]) -> list[str] | None:
+        raw = self._first_value(
+            payload,
+            ("evidence_ids", "evidenceIds", "evidence", "support_ids", "supportIds"),
+        )
+        if raw is None:
+            return None
+
+        candidates: list[str] = []
+        if isinstance(raw, str):
+            candidates = [part.strip() for part in raw.split(",")]
+        elif isinstance(raw, list | tuple):
+            candidates = [str(item).strip() for item in raw if isinstance(item, str)]
+        else:
+            return None
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            if not item or item.lower() in {"null", "none", "nil", "n/a"}:
+                continue
+            key = item.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(item[:64])
+            if len(normalized) >= 3:
+                break
+        return normalized or None
+
     def _first_value(self, payload: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
         for key in keys:
             if key in payload:
@@ -564,14 +642,18 @@ class LLMTickDecider:
             "Avoid generic assistant boilerplate (e.g. 'I'm here for you').\n"
             "Do not mirror or copy recent messages verbatim; rephrase with new wording.\n"
             "say_text must reference a concrete context signal (topic, inbox item, relation, or world event).\n"
+            "For act='move' set say_text=null.\n"
             "Keep strings short: goal up to 60 chars, say_text up to 90 chars.\n"
             "Use agent.allowed_actions and state.cooldowns as hard constraints.\n"
             "If say/message cooldown > 0, do not choose that action.\n"
             "If agent.queue.selected_for_reply is true, focus response on agent.queue.text.\n"
             "If queue.source_type is agent and message action is allowed, prefer act='message' to queue.source_id.\n"
+            "If queue.source_type is world and queue.allow_move_instead_of_say is true, act can be 'say' or 'move'.\n"
             "When queue.selected_for_reply is true and queue.reply_policy.can_skip is false, avoid idle.\n"
             "When queue.selected_for_reply is true and queue.reply_policy.can_skip is true, idle is allowed rarely.\n"
             "If dialogue is allowed for multiple agents, keep the configured minimum share as say/message.\n"
+            "If state.last_action was 'move', prefer continuing the same move target and avoid coordinate jitter.\n"
+            "Use evidence_ids to reference up to 3 relevant ids from recent_events/inbox/memories_top when possible.\n"
             "\n"
             "Format:\n"
             "{\n"
@@ -583,6 +665,7 @@ class LLMTickDecider:
             '      "target_id": "agent id|null",\n'
             '      "say_text": "text|null",\n'
             '      "move_to": {"x": number, "z": number} | null,\n'
+            '      "evidence_ids": ["id1","id2"] | null,\n'
             '      "deltas": {"self_mood": int(-10..10), "relations":[{"to_id":"id","delta":int(-5..5)}]} | null\n'
             "    }\n"
             "  ]\n"
@@ -600,7 +683,8 @@ class LLMTickDecider:
         dialogue_capable = 0
         selected_for_reply = 0
         can_skip_selected = 0
-        must_reply_selected = 0
+        must_text_reply_selected = 0
+        world_action_reply_selected = 0
         for agent_ctx in agents_context:
             if not isinstance(agent_ctx, dict):
                 continue
@@ -613,19 +697,23 @@ class LLMTickDecider:
             if queue.get("selected_for_reply") is not True:
                 continue
             selected_for_reply += 1
+            if bool(queue.get("allow_move_instead_of_say")):
+                world_action_reply_selected += 1
+                continue
             reply_policy = queue.get("reply_policy")
             can_skip = isinstance(reply_policy, dict) and bool(reply_policy.get("can_skip"))
             if can_skip:
                 can_skip_selected += 1
             else:
-                must_reply_selected += 1
+                must_text_reply_selected += 1
 
         if selected_for_reply > 0:
             # Allow skips for a minority of selected agents, but keep most actions as replies.
             max_skip_actions = min(can_skip_selected, max(1, selected_for_reply // 3))
-            min_dialogue_actions = max(
-                must_reply_selected,
-                selected_for_reply - max_skip_actions,
+            min_dialogue_actions = max(0, max(
+                must_text_reply_selected,
+                selected_for_reply - max_skip_actions - world_action_reply_selected,
+            )
             )
         else:
             min_dialogue_actions = 0 if dialogue_capable == 0 else max(1, dialogue_capable // 2)
@@ -649,8 +737,11 @@ class LLMTickDecider:
                 "max_say_text_len": 280,
                 "prefer_goal_len": 60,
                 "prefer_say_text_len": 90,
+                "max_evidence_ids": 3,
+                "anti_jitter_move_when_last_action_move": True,
                 "min_say_or_message_actions_if_allowed": min_dialogue_actions,
                 "selected_for_reply_agents": selected_for_reply,
+                "selected_reply_agents_allowing_move_action": world_action_reply_selected,
                 "max_idle_in_selected_queue": 0 if selected_for_reply == 0 else (selected_for_reply - min_dialogue_actions),
                 "response_should_be_minified_json_single_line": True,
                 "allowed_act_values": ["move", "say", "message", "idle"],

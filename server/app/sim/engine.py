@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -122,6 +123,11 @@ class StubWorld:
 
         self.llm_decider = LLMTickDecider.from_env()
         self.llm_first_hard_mode = _env_bool("LLM_FIRST_HARD_MODE", True)
+        self.llm_trace_events_enabled = _env_bool("LLM_TRACE_EVENTS_ENABLED", True)
+        self.llm_trace_logs_enabled = _env_bool("LLM_TRACE_LOGS_ENABLED", True)
+        self.llm_trace_max_chars = _env_int("LLM_TRACE_EVENT_MAX_CHARS", 6000, 512, 50000)
+        if self.llm_trace_events_enabled or self.llm_trace_logs_enabled:
+            self.llm_decider.trace_callback = self._emit_llm_trace_events
         self.memory_store = EpisodicMemoryStore.from_env()
 
         self.prompt_recent_events_limit = _env_int("LLM_PROMPT_RECENT_EVENTS", 6, 2, 24)
@@ -594,6 +600,89 @@ class StubWorld:
             "tick": event.get("tick"),
         }
 
+    def _reply_task_allows_move_instead_of_text(self, reply_task: ReplyTask | None) -> bool:
+        if reply_task is None:
+            return False
+        if reply_task.source_type != "world":
+            return False
+        if reply_task.source_id:
+            return False
+        return "user_message" not in set(reply_task.tags)
+
+    def _safe_json_text(self, value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            return repr(value)
+
+    def _truncate_llm_trace_text(self, text: str) -> str:
+        if len(text) <= self.llm_trace_max_chars:
+            return text
+        truncated = len(text) - self.llm_trace_max_chars
+        suffix = f"... [truncated {truncated} chars]"
+        head_limit = max(0, self.llm_trace_max_chars - len(suffix))
+        return f"{text[:head_limit]}{suffix}"
+
+    def _emit_llm_trace_events(self, payload: dict[str, Any]) -> None:
+        if not self.llm_trace_events_enabled and not self.llm_trace_logs_enabled:
+            return
+
+        tick = payload.get("tick", self.state.tick)
+        expected_raw = payload.get("expected_agent_ids")
+        expected_agent_ids = list(expected_raw) if isinstance(expected_raw, list | tuple) else []
+
+        prompt_text = self._truncate_llm_trace_text(
+            "LLM_PROMPT "
+            + self._safe_json_text(
+                {
+                    "tick": tick,
+                    "expected_agent_ids": expected_agent_ids,
+                    "prompt": payload.get("prompt"),
+                }
+            )
+        )
+        response_text = self._truncate_llm_trace_text(
+            "LLM_RESPONSE "
+            + self._safe_json_text(
+                {
+                    "tick": tick,
+                    "expected_agent_ids": expected_agent_ids,
+                    "response": payload.get("response"),
+                }
+            )
+        )
+
+        if self.llm_trace_logs_enabled:
+            trace_logger = logging.getLogger("app.sim.llm_trace")
+            trace_logger.warning(prompt_text)
+            trace_logger.warning(response_text)
+
+        if self.llm_trace_events_enabled:
+            self._append_event(
+                source_type="system",
+                source_id=None,
+                text=prompt_text,
+                tags=["system", "llm", "llm_trace", "llm_prompt"],
+            )
+            self._append_event(
+                source_type="system",
+                source_id=None,
+                text=response_text,
+                tags=["system", "llm", "llm_trace", "llm_response"],
+            )
+
+    def _recent_events_for_prompt(self, limit: int) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for event in reversed(self.state.event_log):
+            tags = set(event.get("tags", []))
+            if "llm_trace" in tags:
+                continue
+            items.append(event)
+            if len(items) >= limit:
+                break
+        items.reverse()
+        return items
+
     def _fallback_memories(self, agent_id: str, limit: int) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for event in reversed(self.state.event_log):
@@ -677,10 +766,12 @@ class StubWorld:
                     "inbox_id": reply_task.inbox_id,
                     "source_id": reply_task.source_id,
                     "source_type": reply_task.source_type,
+                    "tags": list(reply_task.tags)[:4],
                     "text": reply_task.text[:180],
                     "wait_ticks": self.state.tick - reply_task.created_tick,
                     "retries": reply_task.retries,
                     "skips": reply_task.skips,
+                    "allow_move_instead_of_say": self._reply_task_allows_move_instead_of_text(reply_task),
                     "reply_policy": {
                         "can_skip": self.reply_policy_by_agent.get(agent.id, ReplyPolicy(False, 0.0)).can_skip,
                         "max_skips": self.reply_queue_max_skips,
@@ -705,7 +796,7 @@ class StubWorld:
             "allowed_actions": allowed_actions,
             "recent_events": [
                 self._event_prompt_item(event)
-                for event in list(self.state.event_log)[-self.prompt_recent_events_limit :]
+                for event in self._recent_events_for_prompt(self.prompt_recent_events_limit)
             ],
             "inbox": inbox_items,
             "memories_top": self._memories_for_prompt(agent.id, query=query, limit=self.prompt_memories_limit),
@@ -726,7 +817,7 @@ class StubWorld:
             },
             "recent_events": [
                 self._event_prompt_item(event)
-                for event in list(self.state.event_log)[-self.prompt_recent_events_limit :]
+                for event in self._recent_events_for_prompt(self.prompt_recent_events_limit)
             ],
         }
 
@@ -1251,10 +1342,23 @@ class StubWorld:
             relations_changed = True
         return relations_changed
 
-    def _consume_inbox(self, agent: AgentState, intent: ActionIntent, inbox_id: str | None = None) -> None:
+    def _intent_satisfies_must_answer(self, intent: ActionIntent, allow_action_reply: bool) -> bool:
+        if intent.kind in {"say", "message"}:
+            return True
+        if allow_action_reply and intent.kind == "move":
+            return True
+        return False
+
+    def _consume_inbox(
+        self,
+        agent: AgentState,
+        intent: ActionIntent,
+        inbox_id: str | None = None,
+        allow_nonverbal: bool = False,
+    ) -> None:
         if not agent.inbox:
             return
-        if intent.kind not in {"say", "message"}:
+        if intent.kind not in {"say", "message"} and not allow_nonverbal:
             return
 
         index = -1
@@ -1342,9 +1446,15 @@ class StubWorld:
         agent: AgentState,
         must_answer: bool,
         reply_task: ReplyTask | None = None,
+        allow_action_reply: bool = False,
     ) -> ActionIntent:
-        if must_answer and agent.inbox:
+        if must_answer and agent.inbox and not allow_action_reply:
             return self._fallback_response_intent(agent, reply_task=reply_task)
+        if must_answer and allow_action_reply:
+            friend_id = pick_best_friend(self.state.relations, agent.id, sorted(self.state.agents.keys()))
+            if friend_id:
+                return ActionIntent(kind="move", target_id=friend_id)
+            return ActionIntent(kind="move", destination=SAFE_POINT)
 
         if not self.llm_decider.enabled and agent.say_cooldown == 0 and self.state.tick % 6 == 0:
             text = templates.render("explore", self.state.tick + len(agent.memory_short))
@@ -1364,9 +1474,11 @@ class StubWorld:
             return ActionIntent(kind="move", target_id=friend_id)
         return ActionIntent(kind="move", destination=pick_wander_target(agent.id, self.state.tick))
 
-    def _fallback_plan(self, agent: AgentState, must_answer: bool) -> str:
-        if must_answer:
+    def _fallback_plan(self, agent: AgentState, must_answer: bool, allow_action_reply: bool = False) -> str:
+        if must_answer and not allow_action_reply:
             return "Respond to incoming message"
+        if must_answer and allow_action_reply:
+            return "Handle world cue with movement"
         if agent.mood < -55:
             return "Move to safer place"
         if agent.mood > 40:
@@ -1378,16 +1490,24 @@ class StubWorld:
         agent: AgentState,
         must_answer: bool,
         reply_task: ReplyTask | None = None,
+        allow_action_reply: bool = False,
     ) -> ActionIntent:
-        if must_answer and agent.inbox:
+        if must_answer and agent.inbox and not allow_action_reply:
             return self._fallback_response_intent(agent, reply_task=reply_task)
+        if must_answer and allow_action_reply:
+            friend_id = pick_best_friend(self.state.relations, agent.id, sorted(self.state.agents.keys()))
+            if friend_id:
+                return ActionIntent(kind="move", target_id=friend_id)
+            return ActionIntent(kind="move", destination=SAFE_POINT)
         if agent.mood < -55:
             return ActionIntent(kind="move", destination=SAFE_POINT)
         return ActionIntent(kind="move", destination=pick_wander_target(agent.id, self.state.tick))
 
-    def _llm_first_failsafe_plan(self, must_answer: bool) -> str:
-        if must_answer:
+    def _llm_first_failsafe_plan(self, must_answer: bool, allow_action_reply: bool = False) -> str:
+        if must_answer and not allow_action_reply:
             return "LLM timeout: sending fail-safe reply"
+        if must_answer and allow_action_reply:
+            return "LLM timeout: fail-safe move for world cue"
         return "Awaiting LLM directive"
 
     def _should_retry_llm_before_fallback(self, must_answer: bool) -> bool:
@@ -1452,6 +1572,7 @@ class StubWorld:
     ) -> tuple[list[dict], bool]:
         periodic_unqueued_release = self._periodic_unqueued_reply_allowed(agent)
         must_answer = reply_task is not None or self._has_pending_must_reply(agent)
+        allow_action_reply = self._reply_task_allows_move_instead_of_text(reply_task)
 
         apply_ignored_inbox_penalty(
             relations=self.state.relations,
@@ -1496,7 +1617,7 @@ class StubWorld:
         if llm_decision is not None:
             llm_intent = self._intent_from_llm_decision(agent, llm_decision)
             if llm_intent is not None:
-                if must_answer and llm_intent.kind not in {"say", "message"}:
+                if must_answer and not self._intent_satisfies_must_answer(llm_intent, allow_action_reply):
                     llm_intent = None
                 else:
                     intent = llm_intent
@@ -1514,19 +1635,36 @@ class StubWorld:
                         reply_task=reply_task,
                     )
                 retry_intent = self._intent_from_llm_decision(agent, retry_decision) if retry_decision is not None else None
-                if retry_intent is not None and (not must_answer or retry_intent.kind in {"say", "message"}):
+                if retry_intent is not None and (not must_answer or self._intent_satisfies_must_answer(retry_intent, allow_action_reply)):
                     intent = retry_intent
                     used_llm = True
                     llm_decision = retry_decision
                     agent.current_plan = retry_decision.goal.strip() or agent.current_plan
                     agent.target_id = retry_intent.target_id
                 else:
-                    intent = self._llm_first_failsafe_intent(agent, must_answer=must_answer, reply_task=reply_task)
-                    agent.current_plan = self._llm_first_failsafe_plan(must_answer=must_answer)
+                    intent = self._llm_first_failsafe_intent(
+                        agent,
+                        must_answer=must_answer,
+                        reply_task=reply_task,
+                        allow_action_reply=allow_action_reply,
+                    )
+                    agent.current_plan = self._llm_first_failsafe_plan(
+                        must_answer=must_answer,
+                        allow_action_reply=allow_action_reply,
+                    )
                     agent.target_id = intent.target_id
             else:
-                fallback_intent = self._fallback_intent(agent, must_answer=must_answer, reply_task=reply_task)
-                agent.current_plan = self._fallback_plan(agent, must_answer=must_answer)
+                fallback_intent = self._fallback_intent(
+                    agent,
+                    must_answer=must_answer,
+                    reply_task=reply_task,
+                    allow_action_reply=allow_action_reply,
+                )
+                agent.current_plan = self._fallback_plan(
+                    agent,
+                    must_answer=must_answer,
+                    allow_action_reply=allow_action_reply,
+                )
                 agent.target_id = fallback_intent.target_id
 
                 if (
@@ -1542,7 +1680,10 @@ class StubWorld:
                     if retry_decision is not None:
                         retry_intent = self._intent_from_llm_decision(agent, retry_decision)
 
-                    if retry_intent is not None and (not must_answer or retry_intent.kind in {"say", "message"}):
+                    if retry_intent is not None and (
+                        not must_answer
+                        or self._intent_satisfies_must_answer(retry_intent, allow_action_reply)
+                    ):
                         intent = retry_intent
                         used_llm = True
                         llm_decision = retry_decision
@@ -1560,6 +1701,18 @@ class StubWorld:
         if event is not None and agent.inbox and intent.kind in {"say", "message"}:
             consumed_inbox_id = reply_task.inbox_id if reply_task is not None else None
             self._consume_inbox(agent, intent, inbox_id=consumed_inbox_id)
+        elif (
+            reply_task is not None
+            and event is None
+            and intent.kind == "move"
+            and allow_action_reply
+        ):
+            self._consume_inbox(
+                agent,
+                intent,
+                inbox_id=reply_task.inbox_id,
+                allow_nonverbal=True,
+            )
         elif reply_task is not None and event is None:
             reply_task.retries += 1
 
@@ -1707,6 +1860,20 @@ class StubWorld:
         if agent_id:
             items = [event for event in items if event.get("source_id") == agent_id]
         return items[-max(1, min(limit, 500)) :]
+
+    def events_since(self, after_event_id: int) -> list[dict]:
+        threshold = max(0, int(after_event_id))
+
+        def _event_id_as_int(event: dict[str, Any]) -> int:
+            raw = str(event.get("id", ""))
+            if raw.startswith("e"):
+                raw = raw[1:]
+            try:
+                return int(raw)
+            except ValueError:
+                return 0
+
+        return [event for event in self.state.event_log if _event_id_as_int(event) > threshold]
 
     def update_speed(self, speed: float) -> float:
         self.state.speed = _clamp_float(speed, 0.1, 5.0)
