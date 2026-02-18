@@ -10028,7 +10028,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 56db8ce88a2a7817cb324a65ca7a4f1e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: '::'
-  speechBubblePrefab: {fileID: 7257203723311688180, guid: 81e4902f885a3174986b18a92e2ce396,
+  speechBubblePrefab: {fileID: 657301789461835990, guid: 6265a0cb8779b654b8c5e2273f33252c,
     type: 3}
 --- !u!4 &1036327237
 Transform:
