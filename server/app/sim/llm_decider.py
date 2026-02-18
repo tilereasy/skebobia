@@ -769,7 +769,7 @@ class LLMTickDecider:
                 must_text_reply_selected += 1
 
         if selected_for_reply > 0:
-            # Allow skips for a minority of selected agents, but keep most actions as replies.
+            # Разрешаем пропуски только для меньшинства выбранных агентов, но большинство действий остаются ответами.
             max_skip_actions = min(can_skip_selected, max(1, selected_for_reply // 3))
             min_dialogue_actions = max(0, max(
                 must_text_reply_selected,
@@ -798,7 +798,7 @@ class LLMTickDecider:
                         break
 
         if recent_world_micro_event_ids and dialogue_capable > 0:
-            # Micro-bonus: if world/micro just happened, nudge at least one extra dialogue action.
+            # Микро-бонус: если world/micro только что произошел, подталкиваем хотя бы еще одно диалоговое действие.
             min_dialogue_actions = max(
                 min_dialogue_actions,
                 min(dialogue_capable, min_dialogue_actions + 1),

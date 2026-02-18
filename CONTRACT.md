@@ -1,152 +1,127 @@
 # Skebobia Contract
 
-## 1) Scope
-Документ фиксирует единый технический контракт между компонентами:
-- `gateway` (Nginx)
-- `server` (FastAPI + simulation + WS)
-- `dashboard` (Web client)
-- `scene` (Unity WebGL client)
+Документ фиксирует актуальный контракт между `gateway`, `server`, `dashboard`, `scene`.
 
-Цель: все клиенты читают и отображают один и тот же источник истины от `server` через единые HTTP/WS интерфейсы за `gateway`.
+## 1. Скоуп
+- Источник истины по состоянию мира: только `server`.
+- Клиенты (`dashboard`, `scene`) читают состояние сервера и отправляют управление через HTTP.
+- Realtime-доставка — через единый WebSocket поток `WS /ws/stream`.
 
-## 2) Routing Contract (gateway)
-Единая точка входа под одним доменом:
-- `/` -> `dashboard`
-- `/scene/` -> `scene` (Unity WebGL static)
-- `/api/` -> `server` REST API
-- `/ws/` -> `server` WebSocket
+## 2. Сетевой контракт
 
-Обязательства gateway:
-- проксировать WebSocket с корректными `Upgrade/Connection` заголовками
-- не ломать поток `/ws/stream` кешированием
-- сохранять корректную работу относительных путей Unity под `/scene/` (как директория)
+### 2.1 Маршруты gateway (`gateway/nginx.conf`)
+- `/` -> `dashboard:80`
+- `/scene/` -> `scene:80`
+- `/api/` -> `server:8000`
+- `/ws/` -> `server:8000`
 
-## 3) Base URLs (local)
-- Dashboard: `http://localhost/`
-- Scene: `http://localhost/scene/`
-- Health: `http://localhost/api/health`
-- WS stream: `ws://localhost/ws/stream`
+Gateway обязан:
+- проксировать WebSocket с `Upgrade/Connection`;
+- не кешировать `/ws/*`;
+- держать `/scene/` как директорию (редирект `/scene` -> `/scene/`).
 
-## 4) Server Contract
+### 2.2 Прямой доступ к server
+В `docker-compose.yml` открыт `8000:8000`.
+Это нужно, потому что оба клиента по умолчанию обращаются к `:8000` напрямую.
 
-### 4.1 REST API (MVP)
-- `GET /api/health` -> `200 OK`
-- `GET /api/agents` -> список агентов (`id`, `name`, `avatar`, `mood`, `mood_label`, `current_plan`)
-- `GET /api/state` -> стартовый снапшот мира (`server_time`, `agents`, `relations`, `events`)
-- `GET /api/agents/{id}` -> профиль агента (`traits`, `mood`, `current_plan`, `key_memories`, `recent_events`)
-- `GET /api/relations` -> граф отношений (`nodes`, `edges`)
-- `GET /api/events?limit=...&agent_id=...` -> лента событий
-- `POST /api/control/event` body: `{ "text": "string", "importance": number? }` -> `{ "event_id": "..." }`
-- `POST /api/control/message` body: `{ "agent_id": "string", "text": "string" }` -> `{ "accepted": true }`
-- `POST /api/control/speed` body: `{ "speed": number }` -> `{ "speed": number }`
+## 3. Server Contract (`server/app/main.py`)
 
-### 4.2 WebSocket
+### 3.1 REST API
+- `GET /api/health` -> `{ "status": "ok" }`
+- `GET /api/state` -> полный снапшот:
+  - `tick`, `speed`, `agents`, `relations`, `events`
+  - `llm_stats`, `world_event_stats`, `memory_stats`
+  - `runtime` (добавляется в `main.py`: `last_tick_ms`, `avg_tick_ms`)
+- `GET /api/agents` -> краткие карточки агентов (`id`, `name`, `avatar`, `mood`, `mood_label`, `current_plan`)
+- `GET /api/agents/{agent_id}` -> расширенный профиль агента (память, recent events, relations snapshot, cooldowns)
+- `GET /api/relations` -> `{ nodes, edges }`
+- `GET /api/events?limit=1..500&agent_id=...` -> лента событий
+
+Control endpoints:
+- `POST /api/control/event`
+  - body: `{ "text": "...", "importance": 0..1? }`
+  - resp: `{ "event_id": "e...", "reaction_event_ids": ["e...", ...] }`
+- `POST /api/control/message`
+  - body: `{ "agent_id": "a1", "text": "..." }`
+  - resp: `{ "accepted": true, "event_id": "...", "reply_event_id": "...|null", "reply_pending": bool }`
+- `POST /api/control/speed`
+  - body: `{ "speed": 0.1..5.0 }`
+  - resp: `{ "speed": number }`
+- `POST /api/control/agent/add`
+  - body: `{ "id"?, "name", "traits"?, "avatar"?, "mood"?, "pos_x"?, "pos_z"? }`
+  - resp: `{ "accepted": true, "agent": {...summary...} }`
+- `POST /api/control/agent/remove`
+  - body: `{ "agent_id": "aN" }`
+  - resp: `{ "accepted": true, "agent_id": "aN" }`
+
+### 3.2 WebSocket
 - Endpoint: `WS /ws/stream`
-- Типы исходящих сообщений:
-  - `event`
-  - `agents_state`
-  - `relations`
+- При подключении сервер сразу отправляет:
+  - один `agents_state`
+  - один `relations`
+  - до 10 последних `event`
+- Далее потоковые сообщения:
+  - `{ "type": "agents_state", "payload": [...] }`
+  - `{ "type": "event", "payload": {...} }`
+  - `{ "type": "relations", "payload": {...} }`
 
-Минимальный формат сообщений:
-```json
-{ "type": "event", "payload": { "...": "..." } }
-{ "type": "agents_state", "payload": [ { "...": "..." } ] }
-{ "type": "relations", "payload": { "nodes": [], "edges": [] } }
-```
+### 3.3 Минимальные гарантии payload
+`agents_state.payload[i]` содержит минимум:
+- `id`, `name`, `avatar`, `mood`, `mood_label`, `current_plan`
+- `pos`, `look_at`, `last_action`, `last_say`, `target_id`, `tick`
 
-### 4.3 Payload guarantees (минимум)
-`agents_state.payload[]`:
-```json
-{
-  "id": "a1",
-  "name": "Alice",
-  "mood": 20,
-  "mood_label": "happy",
-  "current_plan": "Find SkeBob and apologize",
-  "pos": { "x": 12.3, "y": 0.0, "z": -4.1 },
-  "look_at": { "x": 0.0, "y": 0.0, "z": 1.0 },
-  "last_action": "say",
-  "last_say": "Прасти меня.",
-  "tick" : 42
-}
-```
-
-`event.payload`:
-```json
-{
-  "id": "e123",
-  "ts": "2026-02-16T12:34:56Z",
-  "source_type": "agent|world",
-  "source_id": "a1|null",
-  "text": "Alice said: ...",
-  "tags": ["dialogue"],
-  "tick": 52
-}
-```
+`event.payload` содержит минимум:
+- `id`, `ts`, `source_type`, `source_id`, `text`, `tags`, `tick`
+- опционально: `target_id`, `thread_id`, `expects_reply`, `can_reply`, `importance`, `anchor`, `severity`, `evidence_ids`
 
 `relations.payload`:
-```json
-{
-  "nodes": [{ "id": "a1", "name": "Alice" }],
-  "edges": [{ "from": "a1", "to": "a2", "value": -15 }]
-}
-```
+- `nodes: [{id, name}]`
+- `edges: [{from, to, value}]`, `value` в диапазоне `-100..100`
 
-## 5) Client Contract
-
-### 5.1 Dashboard
-Обязан:
-- подключаться к `ws://<host>/ws/stream`
-- показывать realtime event feed (200-300 последних событий)
-- отображать карточки агентов (`name`, `mood_label`, `current_plan`)
-- отображать граф отношений (`value` в диапазоне `-100..+100`)
+## 4. Dashboard Contract (`dashboard/src/App.jsx`)
+Dashboard обязан:
+- на старте читать `GET /api/state`;
+- держать подключение к `WS /ws/stream`;
+- обновлять события/агентов/отношения по сообщениям WS;
 - отправлять control-команды:
-  - `POST /api/control/event`
-  - `POST /api/control/message`
-  - `POST /api/control/speed`
-- поддерживать инспектор агента через `GET /api/agents/{id}`
+  - `/api/control/event`
+  - `/api/control/message`
+  - `/api/control/speed`
+  - `/api/control/agent/add`
+  - `/api/control/agent/remove`
+- читать инспектор через `GET /api/agents/{id}`.
 
-Режим данных:
-- старт: `GET /api/state`
-- realtime: `WS /ws/stream`
-- fallback (допустим): polling `/api/state` каждые 1-2 сек
+Фоллбек:
+- периодический refresh статистики `GET /api/state` раз в ~3 сек.
 
-### 5.2 Scene (Unity WebGL)
-Обязан:
-- быть доступной по `/scene/`
-- подключаться к `ws://<host>/ws/stream`
+## 5. Scene Contract (`scene/unity/Assets`)
+Scene обязана:
+- загрузить старт через `GET /api/state` (`StateLoader`);
+- подключиться к `WS /ws/stream` (`WsClient`);
 - обрабатывать:
-  - `agents_state`: обновление позиций, mood, plan
-  - `event`: отображение speech bubble для диалогов (например по `tags`/типу dialogue)
-  - `relations`: может игнорировать
-- создавать N визуальных агентов при старте из `GET /api/state` или первого `agents_state`
-- для каждого агента показывать минимум:
-  - имя
-  - mood-индикатор
-  - позицию `pos.x`, `pos.z`
-- плавно интерполировать перемещение между обновлениями
+  - `agents_state` -> позиция, имя, настроение, реплики/план;
+  - `event` -> speech bubble для агентских диалогов;
+  - `relations` можно игнорировать.
 
-## 6) Simulation/Data Rules (server-side MVP)
-- сервер является источником истины по состоянию мира, позиции, mood и отношениям
-- симуляция выполняется тиком (`TICK_INTERVAL_SEC`, базово 2 сек)
-- агентный state минимум: `id`, `name`, `traits`, `mood`, `mood_label`, `current_plan`, `last_action`, `pos`
-- отношения: направленные значения `value` в диапазоне `-100..+100`
-- память (эпизодическая): хранение + семантический поиск + суммаризация при росте контекста
+Текущее значение по умолчанию:
+- `NetConfig.originOverride = "http://localhost:8000"`.
 
-## 7) Configuration Contract (env)
-Минимально поддерживаемые переменные:
-- `LLM_PROVIDER=openai|gemini|yandex|bothub|openrouter`
-- `LLM_API_KEY=...`
-- `VECTOR_DB_URL=...`
-- `DATABASE_URL=...`
-- `TICK_INTERVAL_SEC=2`
-- `DEFAULT_SPEED=1.0`
+## 6. Конфигурационный контракт
+Сервер читает `.env` из корня репозитория (`server/app/main.py`), если переменные не заданы в окружении.
 
-## 8) End-to-End DoD
-Система считается готовой, если одновременно выполняется:
-- открывается `http://localhost/` (dashboard)
-- открывается `http://localhost/scene/` (Unity scene)
-- `GET /api/health` возвращает `200`
-- `WS /ws/stream` стабильно доставляет `event`, `agents_state`, `relations`
-- Dashboard управляет симуляцией через control endpoints
-- Scene показывает движение агентов, настроение и периодические реплики
+Ключевые группы:
+- тики и скорость: `TICK_INTERVAL_SEC`, `RELATIONS_*`
+- LLM: `LLM_DECIDER_*`, `LLM_FIRST_HARD_MODE`, `LLM_FORCE_USER_REPLY_VIA_LLM`
+- world events: `WORLD_EVENTS_*`, `STARTUP_WORLD_EVENT_*`
+- память: `MEMORY_*`
+- PostgreSQL: `POSTGRES_*`, `DATABASE_URL`/`MEMORY_DATABASE_URL`
+
+Базовый шаблон переменных: `.env.example`.
+
+## 7. Definition of Done
+Система считается рабочей, если одновременно:
+- открываются `http://localhost/` и `http://localhost/scene/`;
+- `GET /api/health` отвечает `200` (через gateway и/или напрямую на `:8000`);
+- `WS /ws/stream` стабильно шлет `event`, `agents_state`, `relations`;
+- control-endpoints реально меняют состояние симуляции;
+- scene визуально обновляет агентов и показывает диалоговые bubble.

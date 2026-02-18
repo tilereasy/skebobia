@@ -21,6 +21,6 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  // Network-only strategy to avoid stale wasm/data/framework mismatches.
+  // Стратегия "только сеть", чтобы избежать рассинхрона устаревших wasm/data/framework файлов.
   event.respondWith(fetch(event.request));
 });

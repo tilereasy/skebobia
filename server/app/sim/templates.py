@@ -95,7 +95,7 @@ LOGGER = logging.getLogger("app.sim.templates")
 
 
 def _mix_selector(selector: int) -> int:
-    # Deterministic integer mixer to avoid obvious modulo cycles on sequential ticks.
+    # Детерминированный целочисленный миксер, чтобы избежать заметных циклов на последовательных тиках.
     value = abs(int(selector)) & 0xFFFFFFFF
     value ^= value >> 16
     value = (value * 0x45D9F3B) & 0xFFFFFFFF

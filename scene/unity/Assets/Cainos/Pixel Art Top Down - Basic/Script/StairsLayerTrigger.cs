@@ -4,12 +4,12 @@ using UnityEngine;
 
 namespace Cainos.PixelArtTopDown_Basic
 {
-    //when object enter or exit the trigger, put it to the assigned layer and sorting layers base on the direction
-    //used in the stairs objects for player to travel between layers
+    // когда объект входит в триггер или выходит из него, назначаем слой и sorting layer в зависимости от направления
+    // используется на лестницах, чтобы игрок корректно переходил между слоями
 
     public class StairsLayerTrigger : MonoBehaviour
     {
-        public Direction direction;                                 //direction of the stairs
+        public Direction direction;                                 // направление лестницы
         [Space]
         public string layerUpper;
         public string sortingLayerUpper;

@@ -20,8 +20,8 @@
       <div id="unity-warning"> </div>
     </div>
     <script>
-      // Force-disable legacy PWA caches for WebGL build artifacts.
-      // Mismatched cached wasm/data/framework files often cause "memory access out of bounds".
+      // Принудительно отключаем старые PWA-кэши для артефактов WebGL-сборки.
+      // Несовместимые закэшированные wasm/data/framework файлы часто вызывают "memory access out of bounds".
       window.addEventListener("load", async function () {
         if ("serviceWorker" in navigator) {
           try {
@@ -50,12 +50,12 @@
       var progressBarFull = document.querySelector("#unity-progress-bar-full");
       var warningBanner = document.querySelector("#unity-warning");
 
-      // Shows a temporary message banner/ribbon for a few seconds, or
-      // a permanent error message on top of the canvas if type=='error'.
-      // If type=='warning', a yellow highlight color is used.
-      // Modify or remove this function to customize the visually presented
-      // way that non-critical warnings and error messages are presented to the
-      // user.
+      // Показывает временный баннер на несколько секунд или
+      // постоянное сообщение об ошибке поверх canvas, если type=='error'.
+      // Для type=='warning' используется желтая подсветка.
+      // Измените или удалите эту функцию, чтобы настроить визуальное
+      // отображение некритичных предупреждений и ошибок для
+      // пользователя.
       function unityShowBanner(msg, type) {
         function updateBannerVisibility() {
           warningBanner.style.display = warningBanner.children.length ? 'block' : 'none';
@@ -88,22 +88,21 @@
         productVersion: "0.1",
         showBanner: unityShowBanner,
         // errorHandler: function(err, url, line) {
-        //    alert("error " + err + " occurred at line " + line);
-        //    // Return 'true' if you handled this error and don't want Unity
-        //    // to process it further, 'false' otherwise.
+        //    alert("ошибка " + err + " произошла на строке " + line);
+        //    // Верните 'true', если ошибка обработана и Unity не должна
+        //    // обрабатывать ее дальше; иначе верните 'false'.
         //    return true;
         // },
       };
 
-      // By default Unity keeps WebGL canvas render target size matched with
-      // the DOM size of the canvas element (scaled by window.devicePixelRatio)
-      // Set this to false if you want to decouple this synchronization from
-      // happening inside the engine, and you would instead like to size up
-      // the canvas DOM size and WebGL render target sizes yourself.
+      // По умолчанию Unity синхронизирует размер render target WebGL canvas
+      // с DOM-размером canvas-элемента (с учетом window.devicePixelRatio).
+      // Установите false, если хотите отключить эту синхронизацию в движке
+      // и самостоятельно управлять размерами DOM canvas и WebGL render target.
       // config.matchWebGLToCanvasSize = false;
 
       if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
-        // Mobile device style: fill the whole browser client area with the game canvas:
+        // Режим для мобильных: растягиваем игровую canvas на всю область браузера:
         var meta = document.createElement('meta');
         meta.name = 'viewport';
         meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';

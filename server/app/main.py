@@ -21,7 +21,7 @@ from app.sim.engine import StubWorld
 
 
 def _load_env_from_repo_root() -> None:
-    # server/app/main.py -> repo root is 2 levels up from "server"
+    # server/app/main.py -> корень репозитория на 2 уровня выше папки "server"
     env_path = Path(__file__).resolve().parents[2] / ".env"
     if not env_path.exists():
         return

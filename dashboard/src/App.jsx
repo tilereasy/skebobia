@@ -70,12 +70,12 @@ const STYLES = `
   overflow: auto;
 }
 
-  /* ── Scrollbar ── */
+  /* ── Полоса прокрутки ── */
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border-glow); border-radius: 2px; }
 
-  /* ── Scanline overlay ── */
+  /* ── Оверлей сканлайнов ── */
   #root::before {
     content: '';
     position: fixed; inset: 0; z-index: 9999; pointer-events: none;
@@ -88,7 +88,7 @@ const STYLES = `
     );
   }
 
-  /* ── Grid texture ── */
+  /* ── Текстура сетки ── */
   #root::after {
     content: '';
     position: fixed; inset: 0; z-index: 0; pointer-events: none;
@@ -98,7 +98,7 @@ const STYLES = `
     background-size: 40px 40px;
   }
 
-  /* ── App Shell ── */
+  /* ── Каркас приложения ── */
   .app-shell {
   position: relative;
   z-index: 1;
@@ -108,7 +108,7 @@ const STYLES = `
   overflow: visible;
   }
 
-  /* ── Topbar ── */
+  /* ── Верхняя панель ── */
   .topbar {
     display: flex; align-items: center; justify-content: space-between;
     padding: 10px 20px;
@@ -161,7 +161,7 @@ const STYLES = `
     box-shadow: var(--glow-green), inset 0 0 12px rgba(0,255,157,0.08);
   }
 
-  /* ── WS Pill ── */
+  /* ── Индикатор WS ── */
   .ws-pill {
     font-family: var(--font-display); font-size: 9px; font-weight: 600;
     letter-spacing: 0.15em; text-transform: uppercase;
@@ -179,7 +179,7 @@ const STYLES = `
   .ws-connecting,.ws-reconnecting { color: var(--amber); border-color: rgba(255,182,39,0.4); text-shadow: var(--glow-amber); background-color: rgba(0,255,157,0.04);}
   .ws-error   { color: var(--red);    border-color: rgba(255,61,90,0.4); background-color: rgba(0,255,157,0.04);}
 
-  /* ── Dashboard Grid ── */
+  /* ── Сетка дашборда ── */
   .dashboard-grid {
   flex: 1;
   overflow: visible;
@@ -192,7 +192,7 @@ const STYLES = `
   }
 
 
-  /* ── Panel Base ── */
+  /* ── Основа панели ── */
   .panel {
     background: var(--bg-panel);
     display: flex; flex-direction: column;
@@ -212,7 +212,7 @@ const STYLES = `
 
   .panel-inner { padding: 14px; overflow-y: auto; flex: 1; }
 
-  /* ── Panel Title Row ── */
+  /* ── Строка заголовка панели ── */
   .panel-title-row {
     display: flex; align-items: center; justify-content: space-between;
     padding: 10px 14px 8px;
@@ -230,7 +230,7 @@ const STYLES = `
 
   .panel-title-section { display: flex; align-items: center; gap: 8px; }
 
-  /* ── Inline Controls ── */
+  /* ── Встроенные контролы ── */
   .inline-controls {
     display: flex; align-items: center; gap: 10px;
     flex-wrap: wrap;
@@ -289,7 +289,7 @@ const STYLES = `
   }
   .collapse-btn:hover { color: var(--cyan); }
 
-  /* ── Checkbox Row ── */
+  /* ── Строка чекбокса ── */
   .checkbox-row {
     display: flex; align-items: center; gap: 5px; cursor: pointer;
   }
@@ -297,7 +297,7 @@ const STYLES = `
     accent-color: var(--cyan); cursor: pointer;
   }
 
-  /* ── Event Filters ── */
+  /* ── Фильтры событий ── */
   .event-filters {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     padding: 6px 14px;
@@ -316,7 +316,7 @@ const STYLES = `
   }
   .filter-checkbox:hover { color: var(--cyan); }
 
-  /* ── Event List ── */
+  /* ── Список событий ── */
   .event-list {
   flex: 1;
   overflow-y: auto;
@@ -396,7 +396,7 @@ const STYLES = `
     text-transform: uppercase;
   }
 
-  /* ── Graph Panel ── */
+  /* ── Панель графа ── */
   .graph-panel-compact {
   background: var(--bg-panel-alt);
   position: relative;
@@ -417,7 +417,7 @@ const STYLES = `
 
   .muted { font-size: 10px; color: var(--text-muted); }
 
-  /* ── Side Panel ── */
+  /* ── Боковая панель ── */
   
   .side-panel {
   overflow-y: auto;
@@ -431,7 +431,7 @@ const STYLES = `
   }
   .panel-block:last-child { border-bottom: none; }
 
-  /* ── Agent Cards ── */
+  /* ── Карточки агентов ── */
   .agent-cards { padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
 
   .agent-card {
@@ -468,7 +468,7 @@ const STYLES = `
     font-size: 9px; padding: 3px 9px;
   }
 
-  /* ── Mood Badge ── */
+  /* ── Бейдж настроения ── */
   .mood {
     font-family: var(--font-display); font-size: 8px; font-weight: 600;
     letter-spacing: 0.1em; text-transform: uppercase;
@@ -549,7 +549,7 @@ const STYLES = `
     text-shadow: 0 0 8px rgba(255,126,179,0.5);
   }
 
-  /* ── Control Panel ── */
+  /* ── Панель управления ── */
   .control-form {
     display: flex; flex-direction: column; gap: 5px;
     padding: 10px 12px;
@@ -567,7 +567,7 @@ const STYLES = `
     letter-spacing: 0.05em;
   }
 
-  /* ── Inspect Drawer ── */
+  /* ── Выдвижной инспектор ── */
   .inspect-drawer {
     position: fixed; right: 0; top: 0; bottom: 0;
     width: 360px; z-index: 100;
@@ -646,7 +646,7 @@ const STYLES = `
 
   .error-message { color: var(--red); font-size: 11px; padding: 10px 16px; }
 
-  /* ── Loading Screen ── */
+  /* ── Экран загрузки ── */
   .loading-screen {
     display: flex; align-items: center; justify-content: center;
     height: 100vh; flex-direction: column; gap: 16px;
@@ -968,7 +968,7 @@ export default function App() {
           memory_stats: s.memory_stats || null,
         });
       } catch (_e) {
-        // periodic stats refresh
+        // периодическое обновление статистики
       }
     };
     const timer = setInterval(refresh, 3000);
@@ -1049,7 +1049,7 @@ export default function App() {
       <style>{STYLES}</style>
       <div className="app-shell">
 
-        {/* ── Header ── */}
+        {/* ── Шапка ── */}
         <header className="topbar">
           <div className="topbar-brand">
             <div className="topbar-logo" aria-hidden="true" />

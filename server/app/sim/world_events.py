@@ -82,7 +82,7 @@ class GeneratedWorldEvent:
 
 
 class WorldEventGenerator:
-    # near_train intentionally omitted for now; will be added once coordinates are finalized.
+    # near_train пока намеренно пропущен: добавим после финализации координат.
     DEFAULT_ANCHORS = (
         "tracks",
         "path",

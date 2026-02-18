@@ -1,18 +1,20 @@
-# Gateway (Nginx) единая точка входа
+# Gateway (Nginx)
 
-## Цель
-Свести все сервисы под один домен:
-- `/` → dashboard
-- `/scene/` → unity webgl static
-- `/api/` → server (FastAPI)
-- `/ws/` → server websocket
+`gateway` — единая входная точка в compose-стеке.
 
-## Требования
-- проксирование WebSocket (Upgrade/Connection headers)
-- отключить кеширование для ws
-- корректные пути (Unity любит относительные пути — важно, чтобы /scene/ был “директорией”)
+## Маршруты
+- `/` -> `dashboard:80`
+- `/scene/` -> `scene:80`
+- `/api/` -> `server:8000`
+- `/ws/` -> `server:8000`
 
-## Definition of Done
-- открывается `/` и `/scene/`
-- `/api/health` отвечает 200
-- WS работает через `/ws/stream`
+## Поведение
+- Для `/ws/*` включен корректный WS proxy (`Upgrade`/`Connection`).
+- Для `/ws/*` отключено кеширование и буферизация.
+- `/scene` перенаправляется в `/scene/`, чтобы Unity корректно грузила относительные пути.
+
+## Проверка
+- `http://localhost/` открывает dashboard.
+- `http://localhost/scene/` открывает Unity scene.
+- `http://localhost/api/health` возвращает `200`.
+- `ws://localhost/ws/stream` принимает сообщения.

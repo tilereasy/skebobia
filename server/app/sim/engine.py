@@ -1979,7 +1979,7 @@ class StubWorld:
             return ActionIntent(kind="idle", llm_generated=True)
 
         if decision.act == "move":
-            # LLM movement is intentionally ignored: movement is autonomous/chaotic.
+            # Перемещение из LLM намеренно игнорируется: движение автономное и хаотичное.
             return None
 
         if decision.act == "say":
@@ -2363,7 +2363,7 @@ class StubWorld:
 
                 delta = mood_alignment + plan_alignment + distance_signal + history_signal + decay_to_center
                 if delta == 0 and current != 0:
-                    # Prevent frozen matrices: very rare nudge to center.
+                    # Предотвращаем "замороженные" матрицы: очень редкий сдвиг к центру.
                     seed = (self.state.tick * 17 + sum(ord(ch) for ch in src_id) * 7 + sum(ord(ch) for ch in dst_id) * 11) % 13
                     if seed == 0:
                         delta = -1 if current > 0 else 1
@@ -2765,7 +2765,7 @@ class StubWorld:
                     continue
                 if len(reactions) < len(primary_stances):
                     assigned_stance = primary_stances[len(reactions)]
-                    # Keep stance marker for downstream prompt context/debug.
+                    # Сохраняем маркер stance для нижестоящего контекста промпта и отладки.
                     tag_set = set(intent.tags)
                     tag_set.add("world")
                     tag_set.add(f"stance:{assigned_stance}")
