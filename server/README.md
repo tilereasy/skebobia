@@ -116,6 +116,9 @@ GET /api/agents
 
 GET /api/state
 Получить стартовый снапшот
+Также включает runtime-метрики цикла:
+- runtime.last_tick_ms
+- runtime.avg_tick_ms
 
 GET /api/agents/{id}
 Профиль агента: traits, mood, current_plan, key_memories(top-k), recent_events
@@ -140,6 +143,16 @@ POST /api/control/speed
 Скорость времени
 Body: { speed: number } (например 0.5..5)
 Response: { speed }
+
+POST /api/control/agent/add
+Добавить нового агента на лету
+Body: { id?, name, traits?, avatar?, mood?, pos_x?, pos_z? }
+Response: { accepted: true, agent: {...} }
+
+POST /api/control/agent/remove
+Удалить агента
+Body: { agent_id: string }
+Response: { accepted: true, agent_id: string }
 
 ##### *WebSocket*
 WS /ws/stream

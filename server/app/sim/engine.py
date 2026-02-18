@@ -1391,6 +1391,145 @@ class StubWorld:
                 relations[(src, dst)] = clamp_relation(base)
         return relations
 
+    @staticmethod
+    def _fallback_avatar(agent_id: str) -> str:
+        palette = ("#f4a261", "#2a9d8f", "#e76f51", "#457b9d", "#8ecae6", "#f77f00")
+        idx = abs(sum(ord(ch) for ch in agent_id)) % len(palette)
+        return palette[idx]
+
+    def _next_agent_id(self) -> str:
+        occupied = {agent_id for agent_id in self.state.agents}
+        idx = 1
+        while True:
+            candidate = f"a{idx}"
+            if candidate not in occupied:
+                return candidate
+            idx += 1
+
+    def _suggest_agent_position(self) -> Vec3:
+        if not self.state.agents:
+            return Vec3(0.0, 0.0, 0.0)
+        ordered = self._ordered_agents()
+        pivot = ordered[-1].pos
+        offset_seed = (self.state.tick + len(ordered) * 37) % 6
+        offsets = (
+            (2.6, 0.0),
+            (-2.6, 0.0),
+            (0.0, 2.4),
+            (0.0, -2.4),
+            (1.8, 1.8),
+            (-1.8, -1.8),
+        )
+        dx, dz = offsets[offset_seed]
+        return clamp_position(Vec3(pivot.x + dx, 0.0, pivot.z + dz))
+
+    def add_agent(
+        self,
+        *,
+        name: str,
+        traits: str,
+        mood: int = 0,
+        avatar: str | None = None,
+        agent_id: str | None = None,
+        pos_x: float | None = None,
+        pos_z: float | None = None,
+    ) -> AgentState:
+        normalized_id = (agent_id or "").strip()
+        if not normalized_id:
+            normalized_id = self._next_agent_id()
+        if normalized_id in self.state.agents:
+            raise ValueError(f"agent already exists: {normalized_id}")
+
+        normalized_name = name.strip()[:64] or normalized_id
+        normalized_traits = traits.strip()[:256] or "нейтральный"
+        normalized_mood = _clamp_int(int(mood), -100, 100)
+        normalized_avatar = (avatar or "").strip() or self._fallback_avatar(normalized_id)
+
+        if pos_x is None or pos_z is None:
+            suggested = self._suggest_agent_position()
+            initial_pos = suggested
+        else:
+            initial_pos = clamp_position(Vec3(float(pos_x), 0.0, float(pos_z)))
+        initial_pos = self._separate_from_other_agents(normalized_id, initial_pos)
+
+        new_agent = AgentState(
+            id=normalized_id,
+            name=normalized_name,
+            traits=normalized_traits,
+            mood=normalized_mood,
+            avatar=normalized_avatar,
+            pos=initial_pos,
+            current_plan="наблюдать мир",
+            last_action="idle",
+            last_interaction_tick=self.state.tick,
+        )
+        new_agent.current_plan = plan_for_mood(new_agent.mood_label, selector=len(self.state.agents))
+        self.state.agents[normalized_id] = new_agent
+        self.agent_home_positions[normalized_id] = Vec3(initial_pos.x, 0.0, initial_pos.z)
+
+        for other_id, other in self.state.agents.items():
+            if other_id == normalized_id:
+                continue
+            base_forward = clamp_relation(12 - abs(new_agent.mood - other.mood) // 12)
+            base_backward = clamp_relation(10 - abs(other.mood - new_agent.mood) // 14)
+            self.state.relations[(normalized_id, other_id)] = base_forward
+            self.state.relations[(other_id, normalized_id)] = base_backward
+
+        self._append_event(
+            source_type="system",
+            source_id=None,
+            text=f"В мир добавлен агент {new_agent.name}.",
+            tags=["system", "world", "agent_lifecycle"],
+        )
+        return new_agent
+
+    def remove_agent(self, agent_id: str) -> AgentState:
+        normalized_id = str(agent_id).strip()
+        if normalized_id not in self.state.agents:
+            raise KeyError(normalized_id)
+        if len(self.state.agents) <= 1:
+            raise ValueError("cannot remove the last agent")
+
+        removed = self.state.agents.pop(normalized_id)
+        self.agent_home_positions.pop(normalized_id, None)
+
+        self.state.relations = {
+            key: value
+            for key, value in self.state.relations.items()
+            if normalized_id not in key
+        }
+
+        self.reply_queue = deque(
+            (
+                task
+                for task in self.reply_queue
+                if task.agent_id != normalized_id and task.source_id != normalized_id
+            ),
+            maxlen=self.reply_queue.maxlen,
+        )
+        self.reply_task_by_inbox_id = {
+            inbox_id: task
+            for inbox_id, task in self.reply_task_by_inbox_id.items()
+            if task.agent_id != normalized_id and task.source_id != normalized_id
+        }
+
+        for agent in self.state.agents.values():
+            agent.inbox = [
+                item
+                for item in agent.inbox
+                if item.get("source_id") != normalized_id and item.get("target_id") != normalized_id
+            ]
+            if agent.target_id == normalized_id:
+                agent.target_id = None
+
+        self._append_event(
+            source_type="system",
+            source_id=None,
+            text=f"Агент {removed.name} покинул мир.",
+            tags=["system", "world", "agent_lifecycle"],
+        )
+        return removed
+
     def _seed_initial_events(self) -> None:
         self._append_event(
             source_type="world",
@@ -1983,9 +2122,15 @@ class StubWorld:
             latest_message = agent.inbox[-1]
 
         thread_id = str(latest_message.get("thread_id") or "").strip() or None
-        answer_first_required = self._text_has_question(str(latest_message.get("text", "")))
+        answer_first_required = self._text_has_question(str(latest_message.get("text", ""))) or bool(
+            latest_message.get("no_question_required")
+        )
         source_id = latest_message.get("source_id")
         source_type = str(latest_message.get("source_type", ""))
+        source_tags = {str(tag).lower() for tag in latest_message.get("tags", [])}
+        is_user_message = "user_message" in source_tags
+        is_world_message = source_type == "world" and not is_user_message
+        world_event_id = str(latest_message.get("world_event_id") or "").strip() or None
         source_name = latest_message.get("source_name") or self._agent_name(source_id) or "друг"
         topic = str(latest_message.get("text", ""))[:48]
         agent.last_topic = topic
@@ -2008,12 +2153,15 @@ class StubWorld:
                 thread_id=thread_id,
                 expects_reply=True,
                 force_non_question=answer_first_required,
+                evidence_ids=[world_event_id] if world_event_id else [],
             )
 
         text = templates.render("respond_user", selector)
         tags = ["dialogue", "reply"]
-        if source_type != "agent":
+        if is_user_message:
             tags.append("user_message")
+        if is_world_message:
+            tags.append("world_reply")
         return ActionIntent(
             kind="say",
             text=text,
@@ -2023,6 +2171,7 @@ class StubWorld:
             thread_id=thread_id,
             expects_reply=False,
             force_non_question=answer_first_required,
+            evidence_ids=[world_event_id] if world_event_id else [],
         )
 
     def _fallback_intent(
@@ -2431,6 +2580,10 @@ class StubWorld:
                     fallback_intent = self._fallback_response_intent(agent, reply_task=reply_task)
                     fallback_intent.force_non_question = True
                     intent = fallback_intent
+
+            world_event_id = str(selected_required_message.get("world_event_id") or "").strip()
+            if world_event_id and not intent.evidence_ids:
+                intent.evidence_ids = [world_event_id]
 
         event = self._execute_intent(agent, intent)
 
@@ -2971,6 +3124,21 @@ class StubWorld:
             if event.get("source_id") == agent.id or event.get("target_id") == agent.id
         ][-10:]
 
+        relation_items: list[dict[str, Any]] = []
+        for other in self._ordered_agents():
+            if other.id == agent.id:
+                continue
+            relation_items.append(
+                {
+                    "agent_id": other.id,
+                    "name": other.name,
+                    "value": self.state.relations.get((agent.id, other.id), 0),
+                }
+            )
+        relation_items.sort(key=lambda item: item["value"], reverse=True)
+        top_positive = [item for item in relation_items if item["value"] >= 0][:3]
+        top_negative = list(reversed([item for item in relation_items if item["value"] < 0][-3:]))
+
         return {
             "id": agent.id,
             "name": agent.name,
@@ -2989,6 +3157,10 @@ class StubWorld:
             "memory_short": list(agent.memory_short[-10:]),
             "key_memories": key_memories,
             "recent_events": recent_events,
+            "relations_snapshot": {
+                "top_positive": top_positive,
+                "top_negative": top_negative,
+            },
             "llm_stats": self._llm_stats_payload(),
             "world_event_stats": self._world_event_stats_payload(),
         }

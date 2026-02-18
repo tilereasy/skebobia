@@ -238,7 +238,7 @@ const STYLES = `
 
   label { color: var(--text-secondary); font-size: 11px; }
 
-  select, textarea, input[type="range"] {
+  select, textarea, input[type="range"], input[type="text"], input[type="number"] {
     background: rgba(0,220,255,0.04);
     border: 1px solid var(--border-glow);
     color: var(--text-primary);
@@ -246,11 +246,12 @@ const STYLES = `
     border-radius: 2px; outline: none;
     transition: border-color 0.2s, box-shadow 0.2s;
   }
-  select:focus, textarea:focus {
+  select:focus, textarea:focus, input[type="text"]:focus, input[type="number"]:focus {
     border-color: var(--cyan);
     box-shadow: var(--glow-cyan);
   }
   select { padding: 3px 6px; margin-left: 6px; cursor: pointer; }
+  input[type="text"], input[type="number"] { padding: 4px 6px; width: 100%; }
   textarea { width: 100%; padding: 6px 8px; resize: vertical; min-height: 52px; }
 
   input[type="range"] {
@@ -669,13 +670,15 @@ const STYLES = `
   .dashboard-grid {
     grid-template-columns: 1fr;
     grid-template-areas:
-    "feed graph side"
-    "feed graph side";
+    "feed"
+    "graph"
+    "side";
   }
 
   .feed-panel         { grid-area: feed;}
   .graph-panel-compact { grid-area: graph; }
   .side-panel         { grid-area: side; }
+  .graph-panel-compact { grid-column: auto; }
 }
 `;
 
@@ -776,6 +779,7 @@ export default function App() {
   const [agents, setAgents] = useState([]);
   const [relations, setRelations] = useState({ nodes: [], edges: [] });
   const [events, setEvents] = useState([]);
+  const [simStats, setSimStats] = useState(null);
   const [filterAgentId, setFilterAgentId] = useState("all");
   const [autoScroll, setAutoScroll] = useState(true);
   const [wsStatus, setWsStatus] = useState("connecting");
@@ -786,6 +790,11 @@ export default function App() {
   const [worldEventText, setWorldEventText] = useState("");
   const [messageText, setMessageText] = useState("");
   const [messageAgentId, setMessageAgentId] = useState("");
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentTraits, setNewAgentTraits] = useState("нейтральный, любопытный");
+  const [newAgentMood, setNewAgentMood] = useState(0);
+  const [newAgentAvatar, setNewAgentAvatar] = useState("");
+  const [removeAgentId, setRemoveAgentId] = useState("");
   const [speed, setSpeed] = useState(1);
   const [controlFeedback, setControlFeedback] = useState("");
   const [isInitialLoading, setIsInitialLoading] = useState(true);
@@ -818,13 +827,25 @@ export default function App() {
   const buildLocalInspectData = useCallback((agentId) => {
     const agent = agentById.get(agentId);
     if (!agent) return null;
+    const relationItems = (relations.edges || [])
+      .filter((e) => e.from === agentId)
+      .map((e) => ({
+        agent_id: e.to,
+        name: agentById.get(e.to)?.name || e.to,
+        value: Number(e.value || 0),
+      }))
+      .sort((a, b) => b.value - a.value);
     return {
       id: agent.id, name: agent.name, traits: "n/a (local fallback)",
       mood: agent.mood, mood_label: agent.mood_label, current_plan: agent.current_plan,
       key_memories: [{ text: "Inspector fallback from live stream.", score: null }],
       recent_events: events.filter((e) => e.source_id === agentId).slice(-RECENT_EVENTS_LIMIT),
+      relations_snapshot: {
+        top_positive: relationItems.filter((i) => i.value >= 0).slice(0, 3),
+        top_negative: relationItems.filter((i) => i.value < 0).slice(-3).reverse(),
+      },
     };
-  }, [agentById, events]);
+  }, [agentById, events, relations.edges]);
 
   const fetchInspect = useCallback(async (agentId) => {
     if (!agentId) return;
@@ -858,6 +879,14 @@ export default function App() {
         setRelations(s.relations || { nodes: [], edges: [] });
         setEvents(trimEvents(Array.isArray(s.events) ? s.events : []));
         if (typeof s.speed === "number") setSpeed(s.speed);
+        setSimStats({
+          tick: s.tick,
+          speed: s.speed,
+          runtime: s.runtime || null,
+          llm_stats: s.llm_stats || null,
+          world_event_stats: s.world_event_stats || null,
+          memory_stats: s.memory_stats || null,
+        });
       } catch (e) { setControlFeedback(`Load failed: ${e}`); }
       finally { setIsInitialLoading(false); }
     }
@@ -867,7 +896,8 @@ export default function App() {
   useEffect(() => {
     if (agents.length === 0) return;
     if (!messageAgentId || !agents.some((a) => a.id === messageAgentId)) setMessageAgentId(agents[0].id);
-  }, [agents, messageAgentId]);
+    if (!removeAgentId || !agents.some((a) => a.id === removeAgentId)) setRemoveAgentId(agents[0].id);
+  }, [agents, messageAgentId, removeAgentId]);
 
   useEffect(() => {
     if (filterAgentId !== "all" && !agents.some((a) => a.id === filterAgentId)) setFilterAgentId("all");
@@ -889,7 +919,7 @@ export default function App() {
     const obs = new ResizeObserver(update);
     obs.observe(target);
     return () => obs.disconnect();
-  }, []);
+  }, [collapsedPanels.graph]);
 
   useEffect(() => {
     shouldReconnectRef.current = true;
@@ -922,6 +952,32 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (isInitialLoading) return undefined;
+    let alive = true;
+    const refresh = async () => {
+      try {
+        const s = await fetchJson(apiPath("/api/state"), { method: "GET", headers: { Accept: "application/json" } });
+        if (!alive) return;
+        setSimStats({
+          tick: s.tick,
+          speed: s.speed,
+          runtime: s.runtime || null,
+          llm_stats: s.llm_stats || null,
+          world_event_stats: s.world_event_stats || null,
+          memory_stats: s.memory_stats || null,
+        });
+      } catch (_e) {
+        // periodic stats refresh
+      }
+    };
+    const timer = setInterval(refresh, 3000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [isInitialLoading]);
+
   async function submitWorldEvent(e) {
     e.preventDefault();
     const text = worldEventText.trim();
@@ -945,6 +1001,35 @@ export default function App() {
       if (typeof data.speed === "number") setSpeed(data.speed);
       setControlFeedback(`Speed → ${Number(speed).toFixed(1)}x`);
     } catch (err) { setControlFeedback(`Error: ${err}`); }
+  }
+
+  async function submitAddAgent(e) {
+    e.preventDefault();
+    const name = newAgentName.trim();
+    if (!name) return;
+    try {
+      await postJson("/api/control/agent/add", {
+        name,
+        traits: newAgentTraits.trim() || "нейтральный",
+        mood: Number(newAgentMood),
+        avatar: newAgentAvatar.trim() || null,
+      });
+      setNewAgentName("");
+      setControlFeedback("Agent added");
+    } catch (err) {
+      setControlFeedback(`Error: ${err}`);
+    }
+  }
+
+  async function submitRemoveAgent(e) {
+    e.preventDefault();
+    if (!removeAgentId) return;
+    try {
+      await postJson("/api/control/agent/remove", { agent_id: removeAgentId });
+      setControlFeedback("Agent removed");
+    } catch (err) {
+      setControlFeedback(`Error: ${err}`);
+    }
   }
 
   if (isInitialLoading) {
@@ -1040,6 +1125,11 @@ export default function App() {
                       )}
                     </div>
                     <p>{event.text}</p>
+                    {Array.isArray(event.evidence_ids) && event.evidence_ids.length > 0 && (
+                      <div className="event-meta" style={{ marginTop: 4 }}>
+                        <span className="event-tags">evidence: {event.evidence_ids.join(", ")}</span>
+                      </div>
+                    )}
                   </article>
                 );
               })}
@@ -1057,37 +1147,39 @@ export default function App() {
               </div>
             </div>
             {!collapsedPanels.graph && (
-            <ForceGraph2D
-              graphData={graphData}
-              width={window.innerWidth}
-              height={400}
-              linkSource="from"
-              linkTarget="to"
-              backgroundColor="transparent"
-              nodeLabel={(n) => n.name}
-              linkColor={(l) => l.value >= 0 ? "rgba(0,255,157,0.8)" : "rgba(255,61,90,0.8)"}
-              linkWidth={(l) => 1.5 + Math.abs(l.value || 0) / 20}
-              enableNodeDrag={true}
-              enableZoomInteraction={true}
-              nodeCanvasObject={(node, ctx, globalScale) => {
-                const label = node.name || node.id;
-                const fontSize = GRAPH_NODE_FONT_SIZE / globalScale;
-                ctx.shadowColor = node.color || fallbackNodeColor(node.id);
-                ctx.shadowBlur = 12;
-                ctx.beginPath();
-                ctx.arc(node.x, node.y, GRAPH_NODE_SIZE, 0, 2 * Math.PI);
-                ctx.fillStyle = node.color || fallbackNodeColor(node.id);
-                ctx.fill();
-                ctx.shadowBlur = 0;
-                ctx.strokeStyle = "rgba(0,220,255,0.4)";
-                ctx.lineWidth = 1;
-                ctx.stroke();
-                ctx.font = `${fontSize}px 'Space Mono'`;
-                ctx.fillStyle = "#e8f4ff";
-                ctx.fillText(label, node.x + GRAPH_NODE_SIZE + 3, node.y + fontSize / 3);
-              }}
-              onNodeClick={(node) => fetchInspect(node.id)}
-            />
+            <div className="graph-body" ref={graphWrapRef}>
+              <ForceGraph2D
+                graphData={graphData}
+                width={graphSize.width}
+                height={graphSize.height}
+                linkSource="from"
+                linkTarget="to"
+                backgroundColor="transparent"
+                nodeLabel={(n) => n.name}
+                linkColor={(l) => l.value >= 0 ? "rgba(0,255,157,0.8)" : "rgba(255,61,90,0.8)"}
+                linkWidth={(l) => 1.5 + Math.abs(l.value || 0) / 20}
+                enableNodeDrag={true}
+                enableZoomInteraction={true}
+                nodeCanvasObject={(node, ctx, globalScale) => {
+                  const label = node.name || node.id;
+                  const fontSize = GRAPH_NODE_FONT_SIZE / globalScale;
+                  ctx.shadowColor = node.color || fallbackNodeColor(node.id);
+                  ctx.shadowBlur = 12;
+                  ctx.beginPath();
+                  ctx.arc(node.x, node.y, GRAPH_NODE_SIZE, 0, 2 * Math.PI);
+                  ctx.fillStyle = node.color || fallbackNodeColor(node.id);
+                  ctx.fill();
+                  ctx.shadowBlur = 0;
+                  ctx.strokeStyle = "rgba(0,220,255,0.4)";
+                  ctx.lineWidth = 1;
+                  ctx.stroke();
+                  ctx.font = `${fontSize}px 'Space Mono'`;
+                  ctx.fillStyle = "#e8f4ff";
+                  ctx.fillText(label, node.x + GRAPH_NODE_SIZE + 3, node.y + fontSize / 3);
+                }}
+                onNodeClick={(node) => fetchInspect(node.id)}
+              />
+            </div>
           )}
           </section>
 
@@ -1148,6 +1240,49 @@ export default function App() {
                     />
                     <button type="submit">↗ Apply</button>
                   </form>
+
+                  <form onSubmit={submitAddAgent} className="control-form">
+                    <label htmlFor="agent-name">Add Agent</label>
+                    <input
+                      id="agent-name"
+                      type="text"
+                      value={newAgentName}
+                      onChange={(e) => setNewAgentName(e.target.value)}
+                      placeholder="Имя агента"
+                    />
+                    <input
+                      type="text"
+                      value={newAgentTraits}
+                      onChange={(e) => setNewAgentTraits(e.target.value)}
+                      placeholder="Черты"
+                    />
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        type="number"
+                        min={-100}
+                        max={100}
+                        value={newAgentMood}
+                        onChange={(e) => setNewAgentMood(Number(e.target.value))}
+                        style={{ width: 84 }}
+                        placeholder="Mood"
+                      />
+                      <input
+                        type="text"
+                        value={newAgentAvatar}
+                        onChange={(e) => setNewAgentAvatar(e.target.value)}
+                        placeholder="#hex (опц.)"
+                      />
+                    </div>
+                    <button type="submit">↗ Add Agent</button>
+                  </form>
+
+                  <form onSubmit={submitRemoveAgent} className="control-form">
+                    <label htmlFor="remove-agent">Remove Agent</label>
+                    <select id="remove-agent" value={removeAgentId} onChange={(e) => setRemoveAgentId(e.target.value)}>
+                      {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                    </select>
+                    <button type="submit">↗ Remove Agent</button>
+                  </form>
                 </>
               )}
 
@@ -1156,6 +1291,42 @@ export default function App() {
                   ✓ {controlFeedback}
                 </p>
               )}
+            </div>
+
+            <div className="panel-block">
+              <div className="panel-title-row">
+                <h2>Live Metrics</h2>
+              </div>
+              <div className="inspect-content" style={{ gap: 6 }}>
+                <div className="inspect-field">
+                  <span className="field-label">Tick</span>
+                  <span className="field-value">{simStats?.tick ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">Queue Pending</span>
+                  <span className="field-value">{simStats?.llm_stats?.reply_queue?.pending ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">Avg Tick ms</span>
+                  <span className="field-value">{simStats?.runtime?.avg_tick_ms ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">World / 100 ticks</span>
+                  <span className="field-value">{simStats?.world_event_stats?.metrics?.world_events_per_100_ticks ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">World evidence ratio</span>
+                  <span className="field-value">{simStats?.world_event_stats?.metrics?.agent_world_evidence_ratio_100_ticks ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">Repeat ratio (50)</span>
+                  <span className="field-value">{simStats?.world_event_stats?.metrics?.dialogue_repeat_ratio_recent_50 ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">Memory entries</span>
+                  <span className="field-value">{simStats?.memory_stats?.entries ?? "—"}</span>
+                </div>
+              </div>
             </div>
           </section>
         </main>
@@ -1219,6 +1390,20 @@ export default function App() {
                   {(inspectData.recent_events || []).map((e) => (
                     <li key={e.id}>
                       <span>{e.ts || "—"}</span>{e.text}
+                    </li>
+                  ))}
+                </ul>
+
+                <div className="inspect-section-title">Relations</div>
+                <ul className="inspect-list">
+                  {(inspectData.relations_snapshot?.top_positive || []).map((item) => (
+                    <li key={`rel-pos-${item.agent_id}`}>
+                      <span>+{item.value}</span>{item.name}
+                    </li>
+                  ))}
+                  {(inspectData.relations_snapshot?.top_negative || []).map((item) => (
+                    <li key={`rel-neg-${item.agent_id}`}>
+                      <span>{item.value}</span>{item.name}
                     </li>
                   ))}
                 </ul>
