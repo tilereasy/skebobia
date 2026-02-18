@@ -91,7 +91,7 @@ app/agents/agent.py — состояние агента и сериализац�
 
 app/llm/client.py — провайдер LLM (OpenAI/Gemini/YandexGPT) + таймауты/ретраи
 
-app/memory/store.py — in-memory episodic memory + retrieval
+app/memory/store.py — episodic memory + retrieval (in-memory или pgvector)
 
 app/db/models.py — сущности (Agent, Event, Relation, Memory)
 
@@ -102,8 +102,8 @@ app/ws/ — WebSocket endpoints + broadcaster
 #### **Хранилище**
 
 - runtime state мира хранится в памяти процесса сервера
-- эпизодическая память агентов хранится в in-memory store
-- PostgreSQL/pgvector в compose остаётся опциональным заделом под дальнейшую персистентность
+- эпизодическая память может храниться в in-memory store или в PostgreSQL/pgvector
+- backend памяти выбирается через `MEMORY_BACKEND` (`memory`/`pgvector`/`auto`)
 
 #### **API**
 
@@ -184,6 +184,12 @@ Unity просто интерполирует
 
 TICK_INTERVAL_SEC=2
 RELATIONS_INTERVAL_TICKS=5
+RELATIONS_PASSIVE_STEP_TICKS=3
+RELATIONS_PASSIVE_MAX_DELTA=2
+RELATIONS_RECENT_WINDOW_TICKS=24
+RELATIONS_RECENT_EVENT_WEIGHT=3
+RELATIONS_PROXIMITY_RADIUS=3.5
+RELATIONS_DISTANCE_PENALTY_RADIUS=8.0
 
 # LLM-decider (LLM-first, с мягким salvage partial-ответов)
 LLM_DECIDER_ENABLED=0
@@ -200,6 +206,7 @@ LLM_DECIDER_STRICT_JSON_SCHEMA=0
 LLM_DECIDER_STRICT_SCHEMA_VALIDATION=0
 LLM_DECIDER_BACKFILL_RETRIES=2
 LLM_TARGET_RESPONSE_RATIO=0.9
+LLM_RETRY_ON_MUST_ANSWER=0
 LLM_RESPONSE_RATIO_WINDOW=240
 LLM_PROMPT_RECENT_EVENTS=6
 LLM_PROMPT_INBOX=4
@@ -215,6 +222,12 @@ STARTUP_WORLD_EVENT_IMPORTANCE=0.85
 # Episodic memory
 MEMORY_ENABLED=1
 MEMORY_EPISODES_PER_AGENT=400
+MEMORY_BACKEND=auto
+MEMORY_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/skebobia
+MEMORY_TABLE_NAME=agent_memories_v2
+MEMORY_VECTOR_DIM=1536
+MEMORY_PGVECTOR_CREATE_INDEX=1
+MEMORY_PGVECTOR_IVFFLAT_LISTS=100
 
 #### Запуск
 

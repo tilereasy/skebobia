@@ -196,11 +196,18 @@ async def control_message(payload: ControlMessageIn) -> dict:
         event, reply = world.add_agent_message(payload.agent_id, payload.text)
     except KeyError:
         raise HTTPException(status_code=404, detail="agent not found") from None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     for emitted_event in world.events_since(before_event_id):
         await hub.broadcast({"type": "event", "payload": emitted_event})
     await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
     await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
-    return {"accepted": True, "reply_event_id": reply["id"]}
+    return {
+        "accepted": True,
+        "event_id": event["id"],
+        "reply_event_id": reply["id"] if reply is not None else None,
+        "reply_pending": reply is None,
+    }
 
 
 @app.post("/api/control/speed")

@@ -20,9 +20,27 @@
       <div id="unity-warning"> </div>
     </div>
     <script>
-      window.addEventListener("load", function () {
+      // Force-disable legacy PWA caches for WebGL build artifacts.
+      // Mismatched cached wasm/data/framework files often cause "memory access out of bounds".
+      window.addEventListener("load", async function () {
         if ("serviceWorker" in navigator) {
-          navigator.serviceWorker.register("ServiceWorker.js");
+          try {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map((reg) => reg.unregister()));
+          } catch (e) {
+            console.warn("SW unregister failed:", e);
+          }
+        }
+        if ("caches" in window) {
+          try {
+            const keys = await caches.keys();
+            const toDelete = keys.filter(
+              (k) => k.includes("Skebobia Scene") || k.startsWith("UnityCache_"),
+            );
+            await Promise.all(toDelete.map((k) => caches.delete(k)));
+          } catch (e) {
+            console.warn("Cache cleanup failed:", e);
+          }
         }
       });
 
@@ -57,12 +75,13 @@
       }
 
       var buildUrl = "Build";
-      var loaderUrl = buildUrl + "/webgl.loader.js";
+      var buildVersion = "0.1.1";
+      var loaderUrl = buildUrl + "/webgl.loader.js?v=" + buildVersion;
       var config = {
         arguments: [],
-        dataUrl: buildUrl + "/webgl.data",
-        frameworkUrl: buildUrl + "/webgl.framework.js",
-        codeUrl: buildUrl + "/webgl.wasm",
+        dataUrl: buildUrl + "/webgl.data?v=" + buildVersion,
+        frameworkUrl: buildUrl + "/webgl.framework.js?v=" + buildVersion,
+        codeUrl: buildUrl + "/webgl.wasm?v=" + buildVersion,
         streamingAssetsUrl: "StreamingAssets",
         companyName: "t34M4 n3 R4k0V",
         productName: "Skebobia Scene",

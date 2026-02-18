@@ -139,6 +139,7 @@ class StubWorld:
 
         self.llm_decider = LLMTickDecider.from_env()
         self.llm_first_hard_mode = _env_bool("LLM_FIRST_HARD_MODE", True)
+        self.llm_force_user_reply_via_llm = _env_bool("LLM_FORCE_USER_REPLY_VIA_LLM", True)
         self.llm_trace_events_enabled = _env_bool("LLM_TRACE_EVENTS_ENABLED", True)
         self.llm_trace_logs_enabled = _env_bool("LLM_TRACE_LOGS_ENABLED", True)
         self.llm_trace_max_chars = _env_int("LLM_TRACE_EVENT_MAX_CHARS", 6000, 512, 50000)
@@ -154,6 +155,7 @@ class StubWorld:
         self.target_llm_response_ratio = _env_float("LLM_TARGET_RESPONSE_RATIO", 0.9, 0.1, 0.99)
         self.response_ratio_window = _env_int("LLM_RESPONSE_RATIO_WINDOW", 240, 20, 1000)
         self.dialogue_llm_window: Deque[int] = deque(maxlen=self.response_ratio_window)
+        self.llm_retry_on_must_answer = _env_bool("LLM_RETRY_ON_MUST_ANSWER", False)
 
         self.max_replies_per_tick = _env_int("REPLY_QUEUE_MAX_REPLIES_PER_TICK", 2, 1, 16)
         self.reply_queue_max_wait_ticks = _env_int("REPLY_QUEUE_MAX_WAIT_TICKS", 10, 2, 60)
@@ -181,6 +183,11 @@ class StubWorld:
             1,
             240,
         )
+        self.relations_passive_max_delta = _env_int("RELATIONS_PASSIVE_MAX_DELTA", 2, 1, 6)
+        self.relations_recent_window_ticks = _env_int("RELATIONS_RECENT_WINDOW_TICKS", 24, 4, 240)
+        self.relations_recent_event_weight = _env_int("RELATIONS_RECENT_EVENT_WEIGHT", 3, 0, 12)
+        self.relations_proximity_radius = _env_float("RELATIONS_PROXIMITY_RADIUS", 3.4, 0.5, 20.0)
+        self.relations_distance_penalty_radius = _env_float("RELATIONS_DISTANCE_PENALTY_RADIUS", 8.0, 1.0, 30.0)
         self.world_event_generator = WorldEventGenerator.from_env(client=self.llm_decider.client)
         self.world_events_logger = logging.getLogger("app.sim.world_events")
 
@@ -407,6 +414,13 @@ class StubWorld:
         lowered = str(message.get("text", "")).lower()
         danger_markers = ("опасн", "тревог", "пожар", "угроз", "срочн", "конфликт", "шторм")
         return any(marker in lowered for marker in danger_markers)
+
+    @staticmethod
+    def _is_user_message_payload(message: dict[str, Any] | None) -> bool:
+        if not message:
+            return False
+        tags = {str(tag).lower() for tag in message.get("tags", [])}
+        return "user_message" in tags
 
     def _looks_like_looping_coordination_question(self, text: str) -> bool:
         normalized = self._normalize_dialogue_text(text)
@@ -770,6 +784,7 @@ class StubWorld:
         return {
             "enabled": self.llm_decider.enabled,
             "llm_first_hard_mode": self.llm_first_hard_mode,
+            "force_user_reply_via_llm": self.llm_force_user_reply_via_llm,
             "target_response_ratio": self.target_llm_response_ratio,
             "dialogue_ratio_window": len(self.dialogue_llm_window),
             "dialogue_ratio_llm": round(self._dialogue_ratio(), 3),
@@ -2247,7 +2262,7 @@ class StubWorld:
         if not self.llm_decider.enabled:
             return False
         if must_answer:
-            return True
+            return self.llm_retry_on_must_answer
         return self._dialogue_ratio() < self.target_llm_response_ratio
 
     def _periodic_unqueued_reply_allowed(self, agent: AgentState) -> bool:
@@ -2284,24 +2299,83 @@ class StubWorld:
             return str(message.get("inbox_id", "")) == reply_task.inbox_id
         return allow_unqueued_reply or periodic_unqueued_release
 
-    def _step_relations(self) -> None:
+    @staticmethod
+    def _relation_signal_from_event(tags: set[str], text: str) -> int:
+        if "conflict" in tags:
+            return -3
+        if "help" in tags:
+            return 2
+        if "agent_message" in tags or "reply" in tags or "dialogue" in tags:
+            sentiment = text_sentiment(text)
+            if sentiment < 0:
+                return -1
+            return 1
+        return 0
+
+    def _recent_pair_relation_bias(self, src_id: str, dst_id: str) -> int:
+        if self.relations_recent_event_weight <= 0:
+            return 0
+
+        start_tick = self.state.tick - self.relations_recent_window_ticks
+        score = 0
+        for event in reversed(self.state.event_log):
+            event_tick = int(event.get("tick", self.state.tick))
+            if event_tick < start_tick:
+                break
+            if event.get("source_id") != src_id:
+                continue
+            if event.get("target_id") != dst_id:
+                continue
+
+            tags = {str(tag).lower() for tag in event.get("tags", [])}
+            text = str(event.get("text", ""))
+            score += self._relation_signal_from_event(tags, text)
+            score = _clamp_int(score, -self.relations_recent_event_weight, self.relations_recent_event_weight)
+            if abs(score) >= self.relations_recent_event_weight:
+                break
+        return score
+
+    def _step_relations(self) -> bool:
         if self.state.tick % self.relations_passive_step_ticks != 0:
-            return
+            return False
+        changed = False
         for src_id, src_agent in self.state.agents.items():
             for dst_id, dst_agent in self.state.agents.items():
                 if src_id == dst_id:
                     continue
                 key = (src_id, dst_id)
                 current = self.state.relations[key]
+
                 mood_gap = abs(src_agent.mood - dst_agent.mood)
-                mood_alignment = 1 if mood_gap <= 20 else (-1 if mood_gap >= 75 else 0)
-                plan_alignment = 1 if src_agent.current_plan[:12] == dst_agent.current_plan[:12] else 0
-                decay_to_center = -1 if current > 80 else (1 if current < -80 else 0)
-                delta = mood_alignment + (1 if plan_alignment and mood_alignment >= 0 else 0) + decay_to_center
-                delta = _clamp_int(delta, -1, 1)
+                mood_alignment = 1 if mood_gap <= 35 else (-1 if mood_gap >= 60 else 0)
+
+                plan_src = (src_agent.current_plan or "").strip()
+                plan_dst = (dst_agent.current_plan or "").strip()
+                plan_alignment = 1 if plan_src and plan_dst and plan_src[:10] == plan_dst[:10] else 0
+
+                distance = self._distance_2d(src_agent.pos, dst_agent.pos)
+                distance_signal = 1 if distance <= self.relations_proximity_radius else (
+                    -1 if distance >= self.relations_distance_penalty_radius else 0
+                )
+
+                history_signal = self._recent_pair_relation_bias(src_id, dst_id)
+                decay_to_center = -1 if current > 85 else (1 if current < -85 else 0)
+
+                delta = mood_alignment + plan_alignment + distance_signal + history_signal + decay_to_center
+                if delta == 0 and current != 0:
+                    # Prevent frozen matrices: very rare nudge to center.
+                    seed = (self.state.tick * 17 + sum(ord(ch) for ch in src_id) * 7 + sum(ord(ch) for ch in dst_id) * 11) % 13
+                    if seed == 0:
+                        delta = -1 if current > 0 else 1
+
+                delta = _clamp_int(delta, -self.relations_passive_max_delta, self.relations_passive_max_delta)
                 if delta == 0:
                     continue
-                self.state.relations[key] = clamp_relation(current + delta)
+                updated = clamp_relation(current + delta)
+                if updated != current:
+                    self.state.relations[key] = updated
+                    changed = True
+        return changed
 
     def _run_agent_brain(
         self,
@@ -2314,6 +2388,9 @@ class StubWorld:
         must_answer = reply_task is not None or self._has_pending_must_reply(agent)
         allow_action_reply = self._reply_task_allows_move_instead_of_text(reply_task)
         selected_required_message = self._selected_required_inbox_message(agent, reply_task=reply_task)
+        strict_user_reply_via_llm = (
+            self.llm_force_user_reply_via_llm and self._is_user_message_payload(selected_required_message)
+        )
         answer_first_required = bool(
             selected_required_message is not None
             and self._text_has_question(str(selected_required_message.get("text", "")))
@@ -2354,6 +2431,13 @@ class StubWorld:
         used_llm = False
         llm_first_mode = self.llm_decider.enabled and self.llm_first_hard_mode
 
+        if strict_user_reply_via_llm and not self.llm_decider.enabled:
+            agent.current_plan = "Ожидаю ответ через LLM"
+            agent.last_action = "idle"
+            if reply_task is not None:
+                reply_task.retries += 1
+            return [], False
+
         if llm_decision is None and self.llm_decider.enabled and (must_answer or llm_first_mode):
             llm_decision = self._llm_decision_for_single_agent(
                 agent.id,
@@ -2378,7 +2462,11 @@ class StubWorld:
                     agent.target_id = llm_intent.target_id
 
         if intent is None:
-            if llm_first_mode:
+            if strict_user_reply_via_llm:
+                intent = ActionIntent(kind="idle")
+                agent.current_plan = "Ожидаю ответ через LLM"
+                agent.target_id = None
+            elif llm_first_mode:
                 retry_decision: AgentDecision | None = None
                 if must_answer and llm_decision is None:
                     retry_decision = self._llm_decision_for_single_agent(
@@ -2556,12 +2644,16 @@ class StubWorld:
                             accepted_retry = True
 
                 if not accepted_retry:
-                    if (first_looping and retry_looping) or (
-                        substance_reason == "repetitive_loop" and retry_reason == "repetitive_loop"
-                    ):
-                        intent = self._fallback_move_intent(agent, reply_task=reply_task)
+                    if strict_user_reply_via_llm:
+                        intent = ActionIntent(kind="idle")
+                        agent.current_plan = "Ожидаю ответ через LLM"
                     else:
-                        intent = self._fallback_response_intent(agent, reply_task=reply_task)
+                        if (first_looping and retry_looping) or (
+                            substance_reason == "repetitive_loop" and retry_reason == "repetitive_loop"
+                        ):
+                            intent = self._fallback_move_intent(agent, reply_task=reply_task)
+                        else:
+                            intent = self._fallback_response_intent(agent, reply_task=reply_task)
                     used_llm = False
 
         if (
@@ -2817,10 +2909,11 @@ class StubWorld:
             events.append(world_event)
             events.extend(world_reactions)
 
-        relations_changed = llm_relations_changed or any(event.get("target_id") is not None for event in events)
+        passive_relations_changed = self._step_relations()
+        relations_changed = llm_relations_changed or passive_relations_changed or any(
+            event.get("target_id") is not None for event in events
+        )
         relations_changed = relations_changed or (self.state.tick % self.relations_interval_ticks == 0)
-        if relations_changed:
-            self._step_relations()
 
         return TickResult(events=events, relations_changed=relations_changed)
 
@@ -2994,7 +3087,7 @@ class StubWorld:
             reactions = self._immediate_world_reactions(text=text, sentiment=sentiment, count=reaction_count)
         return event, reactions
 
-    def add_agent_message(self, agent_id: str, text: str) -> tuple[dict, dict]:
+    def add_agent_message(self, agent_id: str, text: str) -> tuple[dict, dict | None]:
         if agent_id not in self.state.agents:
             raise KeyError(agent_id)
 
@@ -3031,6 +3124,9 @@ class StubWorld:
             latest_inbox = target.inbox[-1]
             reply_task = self.reply_task_by_inbox_id.get(latest_inbox.get("inbox_id"))
 
+        if self.llm_force_user_reply_via_llm and not self.llm_decider.enabled:
+            raise RuntimeError("LLM is required for user replies. Enable LLM_DECIDER_ENABLED=1.")
+
         llm_decision = self._llm_decision_for_single_agent(
             target.id,
             retries=self.single_agent_backfill_retries,
@@ -3052,6 +3148,12 @@ class StubWorld:
             intent.expects_reply = False
             if answer_first_required:
                 intent.force_non_question = True
+        elif self.llm_force_user_reply_via_llm:
+            target.current_plan = "Ожидаю ответ через LLM"
+            target.last_action = "idle"
+            if reply_task is not None:
+                reply_task.retries += 1
+            return event, None
         else:
             selector = self.state.tick + self.state.next_event_id
             if sentiment < 0 and parse_traits(target.traits).aggression > 60:
@@ -3076,6 +3178,13 @@ class StubWorld:
         target.say_cooldown = 0
         reply = self._execute_intent(target, intent)
 
+        if reply is None and self.llm_force_user_reply_via_llm:
+            target.current_plan = "Ожидаю ответ через LLM"
+            target.last_action = "idle"
+            if reply_task is not None:
+                reply_task.retries += 1
+            return event, None
+
         if reply is None:
             fallback_text = templates.render("respond_user", self.state.tick + self.state.next_event_id)
             reply = self._append_event(
@@ -3093,11 +3202,11 @@ class StubWorld:
             target.say_cooldown = 2
             target.last_interaction_tick = self.state.tick
 
-        if llm_decision is not None and intent.llm_generated:
+        if reply is not None and llm_decision is not None and intent.llm_generated:
             target.current_plan = llm_decision.goal.strip() or target.current_plan
             self._apply_llm_deltas(target, llm_decision)
 
-        if target.inbox:
+        if reply is not None and target.inbox:
             self._consume_inbox(
                 target,
                 intent,
