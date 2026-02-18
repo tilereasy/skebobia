@@ -15,6 +15,7 @@ public sealed class WsClient : MonoBehaviour
     private WebSocket socket;
     private bool isQuitting;
     private Coroutine reconnectCoroutine;
+    private string lastAgentsStateJson;
 
     public event Action<string> OnMessage;
     public event Action OnConnected;
@@ -96,6 +97,12 @@ public sealed class WsClient : MonoBehaviour
         socket.OnMessage += bytes =>
         {
             string json = Encoding.UTF8.GetString(bytes);
+
+            if (IsAgentsStateMessage(json))
+            {
+                lastAgentsStateJson = json;
+            }
+
             OnMessage?.Invoke(json);
         };
 
@@ -178,5 +185,28 @@ public sealed class WsClient : MonoBehaviour
                 Debug.LogWarning($"WS close failed: {ex.Message}");
             }
         }
+    }
+
+    public bool TryGetLastAgentsState(out string json)
+    {
+        if (!string.IsNullOrWhiteSpace(lastAgentsStateJson))
+        {
+            json = lastAgentsStateJson;
+            return true;
+        }
+
+        json = string.Empty;
+        return false;
+    }
+
+    private static bool IsAgentsStateMessage(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return false;
+        }
+
+        return json.Contains("\"type\":\"agents_state\"") ||
+               json.Contains("\"type\": \"agents_state\"");
     }
 }

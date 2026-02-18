@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import random
 from collections import deque
@@ -13,7 +14,7 @@ from app.agents.agent import AgentState, Vec3, plan_for_mood
 from app.memory.store import EpisodicMemoryStore, _tokenize
 from app.sim import templates
 from app.sim.llm_decider import AgentDecision, LLMTickDecider
-from app.sim.movement import SAFE_POINT, pick_wander_target, step_towards
+from app.sim.movement import SAFE_POINT, clamp_position, pick_wander_target, step_towards
 from app.sim.relations import apply_ignored_inbox_penalty, clamp as clamp_relation, update_relations_from_event
 from app.sim.rules import parse_traits, pick_best_friend, text_sentiment
 from app.sim.world_events import GeneratedWorldEvent, WorldEventGenerator
@@ -112,6 +113,8 @@ class ReplyPolicy:
 
 
 class StubWorld:
+    _WORLD_REACTION_STANCES = ("alarm", "curiosity", "skeptic", "practical", "empathy")
+
     def __init__(
         self,
         relations_interval_ticks: int = 5,
@@ -129,6 +132,10 @@ class StubWorld:
             relations=relations,
             event_log=deque(maxlen=history_limit),
         )
+        self.agent_home_positions: dict[str, Vec3] = {
+            agent_id: Vec3(x=agent.pos.x, y=agent.pos.y, z=agent.pos.z)
+            for agent_id, agent in agents.items()
+        }
 
         self.llm_decider = LLMTickDecider.from_env()
         self.llm_first_hard_mode = _env_bool("LLM_FIRST_HARD_MODE", True)
@@ -164,6 +171,10 @@ class StubWorld:
         self.proactive_llm_agents_per_tick = _env_int("LLM_PROACTIVE_AGENTS_PER_TICK", 1, 0, 8)
         self.startup_world_event_enabled = _env_bool("STARTUP_WORLD_EVENT_ENABLED", True)
         self.startup_world_event_importance = _env_float("STARTUP_WORLD_EVENT_IMPORTANCE", 0.85, 0.2, 1.0)
+        self.chaotic_move_radius = _env_float("CHAOTIC_MOVE_RADIUS", 8.0, 2.0, 18.0)
+        self.chaotic_move_min_distance = _env_float("CHAOTIC_MOVE_MIN_DISTANCE", 1.4, 0.4, 4.0)
+        self.chaotic_move_step = _env_float("CHAOTIC_MOVE_STEP", 2.2, 0.3, 6.0)
+        self.chaotic_background_move_step = _env_float("CHAOTIC_BACKGROUND_MOVE_STEP", 0.38, 0.05, 2.2)
         self.relations_passive_step_ticks = _env_int(
             "RELATIONS_PASSIVE_STEP_TICKS",
             max(2, self.relations_interval_ticks * 2),
@@ -201,6 +212,65 @@ class StubWorld:
         dx = lhs.x - rhs.x
         dz = lhs.z - rhs.z
         return (dx * dx + dz * dz) ** 0.5
+
+    def _clamp_to_home_radius(self, agent_id: str, position: Vec3) -> Vec3:
+        home = self.agent_home_positions.get(agent_id)
+        if home is None:
+            return clamp_position(position)
+        dx = position.x - home.x
+        dz = position.z - home.z
+        distance = math.sqrt(dx * dx + dz * dz)
+        if distance <= self.chaotic_move_radius:
+            return clamp_position(position)
+        ratio = self.chaotic_move_radius / max(distance, 1e-6)
+        return clamp_position(Vec3(home.x + dx * ratio, 0.0, home.z + dz * ratio))
+
+    def _separate_from_other_agents(self, agent_id: str, position: Vec3) -> Vec3:
+        adjusted = Vec3(position.x, 0.0, position.z)
+        min_distance = self.chaotic_move_min_distance
+        for _ in range(2):
+            moved = False
+            for other in self._ordered_agents():
+                if other.id == agent_id:
+                    continue
+                distance = self._distance_2d(adjusted, other.pos)
+                if distance >= min_distance:
+                    continue
+
+                push = (min_distance - distance) + 0.05
+                if distance < 1e-6:
+                    angle_seed = (sum(ord(ch) for ch in agent_id) * 73 + self.state.tick * 29) % 6283
+                    angle = angle_seed / 1000.0
+                    away_x = math.cos(angle)
+                    away_z = math.sin(angle)
+                else:
+                    away_x = (adjusted.x - other.pos.x) / distance
+                    away_z = (adjusted.z - other.pos.z) / distance
+
+                adjusted = Vec3(adjusted.x + away_x * push, 0.0, adjusted.z + away_z * push)
+                adjusted = self._clamp_to_home_radius(agent_id, adjusted)
+                moved = True
+            if not moved:
+                break
+        return clamp_position(adjusted)
+
+    def _chaotic_destination(self, agent: AgentState) -> Vec3:
+        seed = (
+            self.state.tick * 131
+            + sum(ord(ch) for ch in agent.id) * 17
+            + len(agent.inbox) * 29
+            + len(agent.memory_short) * 7
+        )
+        angle = ((seed % 6283) / 1000.0) % (2 * math.pi)
+        distance = 0.55 + (((seed // 11) % 100) / 100.0) * self.chaotic_move_step
+        candidate = Vec3(
+            agent.pos.x + math.cos(angle) * distance,
+            0.0,
+            agent.pos.z + math.sin(angle) * distance,
+        )
+        candidate = self._clamp_to_home_radius(agent.id, candidate)
+        candidate = self._separate_from_other_agents(agent.id, candidate)
+        return candidate
 
     def _question_interval_for_agent(self, agent_id: str) -> int:
         span = max(0, self.question_max_interval_ticks - self.question_min_interval_ticks)
@@ -260,6 +330,24 @@ class StubWorld:
         return any(marker in lowered for marker in blocked_markers)
 
     @staticmethod
+    def _contains_summon_language(text: str) -> bool:
+        lowered = str(text).lower()
+        blocked_markers = (
+            "подойди",
+            "подходи",
+            "подтянись",
+            "иди сюда",
+            "иди ко мне",
+            "встретимся",
+            "давай встретимся",
+            "подойду к тебе",
+            "подойду ближе",
+            "подожди у",
+            "жду тебя у",
+        )
+        return any(marker in lowered for marker in blocked_markers)
+
+    @staticmethod
     def _has_first_person_marker(text: str) -> bool:
         lowered = f" {str(text).lower()} "
         markers = (" я ", " мне ", " меня ", " мой ", " моя ", " мое ", " моё ", " мы ", " нам ", " нас ")
@@ -286,18 +374,17 @@ class StubWorld:
         markers = (
             "иду",
             "пойду",
-            "подойду",
             "двигаюсь",
             "проверю",
-            "уточню",
             "сделаю",
-            "предлагаю",
-            "давай",
-            "собер",
-            "встрет",
-            "координ",
-            "перенесу",
-            "план",
+            "осмотрю",
+            "вижу",
+            "слышу",
+            "заметил",
+            "нашел",
+            "нашёл",
+            "чувствую",
+            "кажется",
         )
         return any(marker in lowered for marker in markers)
 
@@ -868,10 +955,42 @@ class StubWorld:
             payload["evidence_ids"] = list(event.get("evidence_ids", []))[:3]
         return payload
 
+    @staticmethod
+    def _world_reaction_stance_from_text(text: str) -> str:
+        lowered = str(text).lower()
+        if any(token in lowered for token in ("опас", "тревог", "жут", "страш", "напряг")):
+            return "alarm"
+        if any(token in lowered for token in ("не вер", "сомнева", "странно", "подозр")):
+            return "skeptic"
+        if any(token in lowered for token in ("провер", "осмотр", "след", "детал", "факт")):
+            return "practical"
+        if any(token in lowered for token in ("чувств", "поддерж", "пережива", "жалко", "эмоци")):
+            return "empathy"
+        return "curiosity"
+
+    def _world_primary_reactor_count(self, *, importance: float | None, severity: str | None) -> int:
+        if str(severity or "").strip().lower() == "danger":
+            return 2
+        if importance is not None and importance >= 0.8:
+            return 2
+        return 1
+
+    def _primary_stances_for_event(self, *, event_id: str, count: int) -> list[str]:
+        count = max(0, min(count, len(self._WORLD_REACTION_STANCES)))
+        if count == 0:
+            return []
+        base_idx = (sum(ord(ch) for ch in event_id) + self.state.tick * 7) % len(self._WORLD_REACTION_STANCES)
+        return [
+            self._WORLD_REACTION_STANCES[(base_idx + offset) % len(self._WORLD_REACTION_STANCES)]
+            for offset in range(count)
+        ]
+
     def _reply_task_allows_move_instead_of_text(self, reply_task: ReplyTask | None) -> bool:
         if reply_task is None:
             return False
         if reply_task.source_type != "world":
+            return False
+        if "primary_world_reaction" in set(reply_task.tags):
             return False
         if reply_task.source_id:
             return False
@@ -981,7 +1100,7 @@ class StubWorld:
         reply_task: ReplyTask | None = None,
         proactive_selected: bool = False,
     ) -> dict[str, Any]:
-        allowed_actions = ["move", "idle"]
+        allowed_actions = ["idle"]
         if agent.say_cooldown == 0:
             allowed_actions.append("say")
         if agent.message_cooldown == 0:
@@ -999,6 +1118,12 @@ class StubWorld:
                 "expects_reply": bool(message.get("expects_reply", message.get("requires_reply"))),
                 "can_reply": bool(message.get("can_reply", True)),
                 "directed": bool(message.get("directed", False)),
+                "world_event_id": message.get("world_event_id"),
+                "world_reaction_role": message.get("world_reaction_role"),
+                "world_reaction_stance": message.get("world_reaction_stance"),
+                "world_reaction_forbidden_stances": list(message.get("world_reaction_forbidden_stances", []))[:4],
+                "world_reaction_primary_agents": list(message.get("world_reaction_primary_agents", []))[:2],
+                "no_question_required": bool(message.get("no_question_required", False)),
             }
             for message in agent.inbox[-self.prompt_inbox_limit :]
         ]
@@ -1045,6 +1170,20 @@ class StubWorld:
             "answer_first": answer_first,
             "internal_impulse_20pct": self._internal_impulse_20pct(agent),
         }
+        first_world_reaction = bool(
+            selected_message is not None
+            and str(selected_message.get("source_type", "")).lower() == "world"
+            and str(selected_message.get("world_reaction_role", "")) == "primary"
+        )
+        if first_world_reaction:
+            queue_payload["first_world_reaction"] = True
+            queue_payload["world_reaction"] = {
+                "event_id": selected_message.get("world_event_id"),
+                "role": selected_message.get("world_reaction_role"),
+                "assigned_stance": selected_message.get("world_reaction_stance"),
+                "forbidden_stances": list(selected_message.get("world_reaction_forbidden_stances", []))[:4],
+                "primary_reactors": list(selected_message.get("world_reaction_primary_agents", []))[:2],
+            }
         if reply_task is not None:
             queue_payload.update(
                 {
@@ -1508,16 +1647,14 @@ class StubWorld:
                 agent.mood += 1
 
     def _execute_move(self, agent: AgentState, intent: ActionIntent) -> None:
-        if intent.target_id and intent.target_id in self.state.agents:
-            destination = self.state.agents[intent.target_id].pos
-        elif intent.destination is not None:
-            destination = intent.destination
-        else:
-            destination = pick_wander_target(agent.id, self.state.tick)
+        _ = intent
+        destination = self._chaotic_destination(agent)
 
         old_pos = agent.pos
         max_step = 0.6 + 0.45 * max(0.5, self.state.speed)
         new_pos = step_towards(agent.pos, destination, max_step=max_step)
+        new_pos = self._clamp_to_home_radius(agent.id, new_pos)
+        new_pos = self._separate_from_other_agents(agent.id, new_pos)
         agent.pos = new_pos
 
         dx = new_pos.x - old_pos.x
@@ -1526,6 +1663,23 @@ class StubWorld:
             agent.look_at = Vec3(dx, 0.0, dz)
         agent.last_action = "move"
         agent.target_id = intent.target_id
+
+    def _apply_background_movement(self, agent: AgentState) -> None:
+        if agent.last_action == "move":
+            return
+
+        destination = self._chaotic_destination(agent)
+        old_pos = agent.pos
+        max_step = max(0.05, self.chaotic_background_move_step * max(0.5, self.state.speed))
+        new_pos = step_towards(agent.pos, destination, max_step=max_step)
+        new_pos = self._clamp_to_home_radius(agent.id, new_pos)
+        new_pos = self._separate_from_other_agents(agent.id, new_pos)
+        agent.pos = new_pos
+
+        dx = new_pos.x - old_pos.x
+        dz = new_pos.z - old_pos.z
+        if abs(dx) > 1e-6 or abs(dz) > 1e-6:
+            agent.look_at = Vec3(dx, 0.0, dz)
 
     def _execute_say(self, agent: AgentState, intent: ActionIntent) -> dict | None:
         if agent.say_cooldown > 0:
@@ -1671,21 +1825,8 @@ class StubWorld:
             return ActionIntent(kind="idle", llm_generated=True)
 
         if decision.act == "move":
-            target_id: str | None = None
-            if (
-                decision.target_id
-                and decision.target_id in self.state.agents
-                and decision.target_id != agent.id
-            ):
-                target_id = decision.target_id
-
-            destination = None
-            if decision.move_to is not None:
-                destination = Vec3(x=decision.move_to.x, z=decision.move_to.z)
-            if target_id is None and destination is None:
-                destination = pick_wander_target(agent.id, self.state.tick)
-
-            return ActionIntent(kind="move", target_id=target_id, destination=destination, llm_generated=True)
+            # LLM movement is intentionally ignored: movement is autonomous/chaotic.
+            return None
 
         if decision.act == "say":
             if agent.say_cooldown > 0:
@@ -1694,6 +1835,8 @@ class StubWorld:
             if not text:
                 return ActionIntent(kind="idle", llm_generated=True)
             if self._contains_operational_tone(text):
+                return None
+            if self._contains_summon_language(text):
                 return None
             if self._is_third_person_self_reference(agent, text):
                 return None
@@ -1724,6 +1867,8 @@ class StubWorld:
             if not text:
                 return ActionIntent(kind="idle", llm_generated=True)
             if self._contains_operational_tone(text):
+                return None
+            if self._contains_summon_language(text):
                 return None
             if self._is_third_person_self_reference(agent, text):
                 return None
@@ -2024,6 +2169,8 @@ class StubWorld:
             selected_required_message is not None
             and self._text_has_question(str(selected_required_message.get("text", "")))
         )
+        if selected_required_message is not None and bool(selected_required_message.get("no_question_required")):
+            answer_first_required = True
 
         apply_ignored_inbox_penalty(
             relations=self.state.relations,
@@ -2268,6 +2415,23 @@ class StubWorld:
                         intent = self._fallback_response_intent(agent, reply_task=reply_task)
                     used_llm = False
 
+        if (
+            selected_required_message is not None
+            and str(selected_required_message.get("source_type", "")).lower() == "world"
+            and intent.kind in {"say", "message"}
+        ):
+            forbidden_stances = [
+                str(item).strip().lower()
+                for item in selected_required_message.get("world_reaction_forbidden_stances", [])
+                if str(item).strip()
+            ]
+            if forbidden_stances:
+                intent_stance = self._world_reaction_stance_from_text(intent.text)
+                if intent_stance in set(forbidden_stances):
+                    fallback_intent = self._fallback_response_intent(agent, reply_task=reply_task)
+                    fallback_intent.force_non_question = True
+                    intent = fallback_intent
+
         event = self._execute_intent(agent, intent)
 
         if event is not None and agent.inbox and intent.kind in {"say", "message"}:
@@ -2298,8 +2462,17 @@ class StubWorld:
             return reactions
 
         seed = sum(ord(ch) for ch in text) + self.state.tick
-        for idx in range(count):
+        primary_count = _clamp_int(count, 1, 2)
+        primary_stances = self._primary_stances_for_event(event_id=f"immediate-{self.state.tick}", count=primary_count)
+        used_stances: set[str] = set()
+        visited: set[str] = set()
+        for idx in range(len(ordered_agents)):
+            if len(reactions) >= primary_count:
+                break
             speaker = ordered_agents[(seed + idx) % len(ordered_agents)]
+            if speaker.id in visited:
+                continue
+            visited.add(speaker.id)
             if speaker.say_cooldown > 0:
                 continue
 
@@ -2338,6 +2511,22 @@ class StubWorld:
                     merged_tags.add("dialogue")
                 intent.tags = list(merged_tags)
 
+            if len(reactions) == 0 and intent.kind in {"say", "message"}:
+                intent.force_non_question = True
+
+            if intent.kind in {"say", "message"}:
+                current_stance = self._world_reaction_stance_from_text(intent.text)
+                if current_stance in used_stances:
+                    continue
+                if len(reactions) < len(primary_stances):
+                    assigned_stance = primary_stances[len(reactions)]
+                    # Keep stance marker for downstream prompt context/debug.
+                    tag_set = set(intent.tags)
+                    tag_set.add("world")
+                    tag_set.add(f"stance:{assigned_stance}")
+                    intent.tags = list(tag_set)
+                used_stances.add(current_stance)
+
             event = self._execute_intent(speaker, intent)
             if event is not None:
                 reactions.append(event)
@@ -2362,7 +2551,12 @@ class StubWorld:
             )
         return snapshot
 
-    def _pick_world_reaction_agent(self, inbox_by_agent: dict[str, dict[str, Any]]) -> tuple[AgentState, dict[str, Any]] | None:
+    def _pick_world_reaction_agents(
+        self,
+        inbox_by_agent: dict[str, dict[str, Any]],
+        *,
+        count: int,
+    ) -> list[tuple[AgentState, dict[str, Any]]]:
         candidates: list[tuple[tuple[int, int, str], AgentState, dict[str, Any]]] = []
         for agent_id, inbox_message in inbox_by_agent.items():
             agent = self.state.agents.get(agent_id)
@@ -2374,10 +2568,12 @@ class StubWorld:
             candidates.append((rank, agent, inbox_message))
 
         if not candidates:
-            return None
+            return []
         candidates.sort(key=lambda item: item[0])
-        _rank, selected_agent, selected_message = candidates[0]
-        return selected_agent, selected_message
+        selected: list[tuple[AgentState, dict[str, Any]]] = []
+        for _rank, selected_agent, selected_message in candidates[: max(1, count)]:
+            selected.append((selected_agent, selected_message))
+        return selected
 
     def _maybe_emit_generated_world_event(self) -> tuple[dict, list[dict]] | None:
         events_snapshot = list(self.state.event_log)
@@ -2460,6 +2656,7 @@ class StubWorld:
             )
             events.extend(agent_events)
             llm_relations_changed = llm_relations_changed or agent_relations_changed
+            self._apply_background_movement(agent)
 
         generated_world = self._maybe_emit_generated_world_event()
         if generated_world is not None:
@@ -2590,18 +2787,52 @@ class StubWorld:
                 source_id=None,
                 text=text,
                 tags=deduped_tags,
+                expects_reply=False,
+                can_reply=False,
             )
             if inbox_message is not None:
+                inbox_message["world_event_id"] = event["id"]
                 inbox_by_agent[agent.id] = inbox_message
 
         if ensure_agent_reaction and inbox_by_agent:
-            selected = self._pick_world_reaction_agent(inbox_by_agent)
-            if selected is not None:
-                selected_agent, selected_message = selected
+            primary_count = self._world_primary_reactor_count(
+                importance=normalized_importance,
+                severity=severity,
+            )
+            primary_agents = self._pick_world_reaction_agents(
+                inbox_by_agent,
+                count=primary_count,
+            )
+            primary_agent_ids = [agent.id for agent, _ in primary_agents]
+            primary_stances = self._primary_stances_for_event(
+                event_id=str(event.get("id", "")),
+                count=len(primary_agents),
+            )
+
+            for agent_id, inbox_message in inbox_by_agent.items():
+                inbox_message["world_reaction_primary_agents"] = list(primary_agent_ids)
+
+            for idx, (selected_agent, selected_message) in enumerate(primary_agents):
+                selected_tags = [str(tag) for tag in selected_message.get("tags", []) if str(tag).strip()]
+                if "primary_world_reaction" not in selected_tags:
+                    selected_tags.append("primary_world_reaction")
+                selected_message["tags"] = selected_tags
+                selected_message["world_reaction_role"] = "primary"
+                selected_message["world_reaction_stance"] = (
+                    primary_stances[idx] if idx < len(primary_stances) else "curiosity"
+                )
+                selected_message["world_reaction_forbidden_stances"] = list(primary_stances[:idx])
+                selected_message["no_question_required"] = True
                 selected_message["expects_reply"] = True
                 selected_message["requires_reply"] = True
                 selected_message["can_reply"] = True
                 self._queue_reply_task(selected_agent, selected_message)
+
+            for agent_id, inbox_message in inbox_by_agent.items():
+                if agent_id in primary_agent_ids:
+                    continue
+                inbox_message["world_reaction_role"] = "observer"
+                inbox_message["world_reaction_forbidden_stances"] = list(primary_stances)
 
         reactions: list[dict] = []
         if emit_immediate_reactions:

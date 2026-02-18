@@ -111,7 +111,7 @@ class AgentDecision(BaseModel):
             lowered = self.say_text.lower()
             if "?" in lowered:
                 self.speech_intent = "ask"
-            elif any(token in lowered for token in ("предлага", "давай", "план", "собер", "встрет")):
+            elif any(token in lowered for token in ("предлага", "давай", "план", "собер")):
                 self.speech_intent = "propose"
             elif any(token in lowered for token in ("принял", "понял", "согласен", "подтвержда")):
                 self.speech_intent = "confirm"
@@ -670,48 +670,33 @@ class LLMTickDecider:
 
     def _system_prompt(self) -> str:
         return (
-            "You are a decision engine for a live multi-agent social simulation.\n"
-            "Output strictly ONE minified JSON object on a single line.\n"
-            "No markdown, no comments, no code fences, no trailing text.\n"
+            "You choose actions for agents in a live social simulation.\n"
+            "Return strictly ONE minified JSON object on a single line.\n"
+            "No markdown, no comments, no trailing text.\n"
             "Use JSON null values, never the string \"null\".\n"
-            "Use only ids from USER_CONTEXT_JSON.expected_agent_ids.\n"
-            "Return exactly one decision per expected agent id.\n"
+            "Return exactly one decision for each id in USER_CONTEXT_JSON.expected_agent_ids.\n"
+            "Use only those ids.\n"
             "If a field is not used, set null.\n"
-            "The server is authoritative and may reject unsafe choices.\n"
-            "Actions must keep social coherence and avoid pointless isolation.\n"
-            "Primary dialogue language is Russian unless incoming context is clearly another language.\n"
-            "Use each agent's mood, traits and recent context to create distinct voice per agent.\n"
-            "Agents must speak in first person. Never describe themselves in third person.\n"
-            "Avoid generic assistant boilerplate (e.g. 'I'm here for you').\n"
-            "Avoid bureaucratic or project-management tone.\n"
-            "Do not say: 'принял', 'задача', 'синхронизировать шаги', 'уточню факт', 'вернусь с результатом'.\n"
-            "Speak like a person in a park, not a team lead.\n"
-            "Do not mirror or copy recent messages verbatim; rephrase with new wording.\n"
-            "say_text must reference a concrete context signal (topic, inbox item, relation, or world event).\n"
-            "One-word replies are forbidden.\n"
-            "For act='move' set say_text=null.\n"
-            "Keep strings concise but informative: goal up to 60 chars, say_text preferably 140-180 chars.\n"
             "Use agent.allowed_actions and state.cooldowns as hard constraints.\n"
-            "If say/message cooldown > 0, do not choose that action.\n"
-            "If agent.queue.selected_for_reply is true, focus response on agent.queue.text.\n"
-            "If queue.must_message_source is true, act MUST be 'message' and target_id MUST equal queue.source_id.\n"
-            "If queue.answer_first is true, answer queue text directly and do not ask a new question.\n"
+            "If an action is unavailable, choose idle.\n"
+            "If queue.must_message_source is true, act must be 'message' and target_id must equal queue.source_id.\n"
+            "If queue.answer_first is true, answer queue.text directly and do not ask a new question.\n"
             "If queue.question_allowed_now is false, say_text must not contain '?'.\n"
-            "When answering a message/question, say_text should be at least 8-12 words except danger/panic contexts.\n"
-            "Every say/message must choose speech_intent in [inform, propose, ask, confirm, coordinate].\n"
-            "If queue.source_type is world and queue.allow_move_instead_of_say is true, act can be 'say' or 'move'.\n"
-            "When queue.selected_for_reply is true and queue.reply_policy.can_skip is false, avoid idle.\n"
-            "When queue.selected_for_reply is true and queue.reply_policy.can_skip is true, idle is allowed rarely.\n"
-            "If dialogue is allowed for multiple agents, keep the configured minimum share as say/message.\n"
-            "If speaking, prefer: expressing emotion, making observation, revealing personal thought.\n"
-            "Avoid: talking about communication process itself.\n"
-            "Avoid: talking about 'steps' without a concrete object.\n"
-            "If queue.pending_inbox_count is 0 and queue.internal_impulse_20pct is true, prefer a short say/message tied to world or personal interest.\n"
-            "If state.last_action was 'move', prefer continuing the same move target and avoid coordinate jitter.\n"
-            "Use evidence_ids to reference up to 3 relevant ids from recent_events/inbox/memories_top when possible.\n"
-            "If world.recent_events contains a world+micro event, at least one eligible agent should react via say/message.\n"
+            "Primary dialogue language is Russian unless context is clearly another language.\n"
+            "Agents must speak in first person and never describe themselves in third person.\n"
+            "Avoid bureaucratic or project-management tone.\n"
+            "Never say: 'принял', 'задача', 'синхронизировать шаги', 'уточню факт', 'вернусь с результатом'.\n"
+            "Do not summon, call over, or reposition others (no 'подойди', 'иди сюда', 'встретимся', 'подтянись').\n"
+            "Do not repeat interpretation already expressed by another agent.\n"
+            "Choose a unique stance.\n"
+            "Avoid meta-talk about communication process itself and abstract 'steps'.\n"
+            "If speaking, prefer emotion, concrete observation, and personal thought.\n"
+            "Do not copy recent messages verbatim.\n"
+            "One-word replies are forbidden.\n"
+            "Use evidence_ids (up to 3 ids) when relevant.\n"
+            "If world.recent_events contains world+micro, at least one eligible agent should react via say/message.\n"
             "When reacting to world+micro, include that world event id in evidence_ids whenever relevant.\n"
-            "When say/message give grounded sensory details, feelings, or concrete observations.\n"
+            "If queue.first_world_reaction is true, say_text must not contain '?'.\n"
             "\n"
             "Format:\n"
             "{\n"
@@ -837,6 +822,8 @@ class LLMTickDecider:
                 "avoid_generic_assistant_tone": True,
                 "first_person_only": True,
                 "avoid_process_talk": True,
+                "do_not_repeat_interpretation": True,
+                "choose_unique_stance": True,
                 "prefer_react_to_world_micro": bool(recent_world_micro_event_ids),
             },
             "hard_limits": {
@@ -869,6 +856,10 @@ class LLMTickDecider:
                     "синхронизировать шаги",
                     "уточню факт",
                     "вернусь с результатом",
+                    "подойди",
+                    "иди сюда",
+                    "встретимся",
+                    "подтянись",
                 ],
             },
         }

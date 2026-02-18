@@ -5,6 +5,7 @@ public sealed class StreamRouter : MonoBehaviour
 {
     [SerializeField] private WsClient wsClient;
     [SerializeField] private AgentRegistry agentRegistry;
+    [SerializeField] private StateLoader stateLoader;
     private bool subscribed;
 
     private void Awake()
@@ -18,6 +19,11 @@ public sealed class StreamRouter : MonoBehaviour
         {
             agentRegistry = FindAnyObjectByType<AgentRegistry>();
         }
+
+        if (stateLoader == null)
+        {
+            stateLoader = FindAnyObjectByType<StateLoader>();
+        }
     }
 
     private void OnEnable()
@@ -30,6 +36,7 @@ public sealed class StreamRouter : MonoBehaviour
         if (subscribed && wsClient != null)
         {
             wsClient.OnMessage -= HandleMessage;
+            wsClient.OnConnected -= HandleConnected;
             subscribed = false;
         }
     }
@@ -60,7 +67,25 @@ public sealed class StreamRouter : MonoBehaviour
         }
 
         wsClient.OnMessage += HandleMessage;
+        wsClient.OnConnected += HandleConnected;
         subscribed = true;
+
+        ReplayLastAgentsStateIfAvailable();
+    }
+
+    private void HandleConnected()
+    {
+        if (stateLoader == null)
+        {
+            stateLoader = FindAnyObjectByType<StateLoader>();
+        }
+
+        if (stateLoader != null)
+        {
+            stateLoader.LoadStateIfNeeded();
+        }
+
+        ReplayLastAgentsStateIfAvailable();
     }
 
     private void HandleMessage(string json)
@@ -125,6 +150,21 @@ public sealed class StreamRouter : MonoBehaviour
         }
 
         Debug.Log($"WS agents_state: {updated} agents");
+    }
+
+    private void ReplayLastAgentsStateIfAvailable()
+    {
+        if (wsClient == null)
+        {
+            return;
+        }
+
+        if (!wsClient.TryGetLastAgentsState(out string json))
+        {
+            return;
+        }
+
+        HandleAgentsState(json);
     }
 
     private void HandleEvent(string json)
