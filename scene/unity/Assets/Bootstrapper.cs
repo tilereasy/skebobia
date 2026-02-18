@@ -39,9 +39,14 @@ public sealed class Bootstrapper : MonoBehaviour
         }
         agentRegistry.SetSpeechBubblePrefab(speechBubblePrefab);
 
-        if (GetComponent<StateLoader>() == null)
+        StateLoader stateLoader = GetComponent<StateLoader>();
+        if (stateLoader == null)
         {
-            gameObject.AddComponent<StateLoader>();
+            stateLoader = gameObject.AddComponent<StateLoader>();
+        }
+        if (stateLoader != null)
+        {
+            stateLoader.LoadStateIfNeeded();
         }
 
         if (GetComponent<WsClient>() == null)

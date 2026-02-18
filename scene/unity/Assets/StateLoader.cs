@@ -12,8 +12,11 @@ public sealed class StateLoader : MonoBehaviour
     [SerializeField, Min(1)] private int timeoutSec = 10;
 
     private readonly List<AgentState> agents = new List<AgentState>();
+    private bool isLoading;
+    private bool hasLoadedOnce;
 
     public IReadOnlyList<AgentState> Agents => agents;
+    public bool HasLoadedState => hasLoadedOnce;
 
     public event Action<IReadOnlyList<AgentState>> StateLoaded;
     public event Action<string> StateLoadFailed;
@@ -35,61 +38,85 @@ public sealed class StateLoader : MonoBehaviour
     {
         if (loadOnStart)
         {
-            LoadState();
+            LoadStateIfNeeded();
         }
     }
 
     public void LoadState()
     {
+        if (isLoading)
+        {
+            return;
+        }
+
         StartCoroutine(LoadStateRoutine());
+    }
+
+    public void LoadStateIfNeeded()
+    {
+        if (hasLoadedOnce || isLoading)
+        {
+            return;
+        }
+
+        LoadState();
     }
 
     private IEnumerator LoadStateRoutine()
     {
-        if (netConfig == null)
-        {
-            NotifyFailed("StateLoader: NetConfig is missing.");
-            yield break;
-        }
-
-        string url = netConfig.StateUrl;
-        using UnityWebRequest request = UnityWebRequest.Get(url);
-        request.timeout = timeoutSec;
-        request.SetRequestHeader("Accept", "application/json");
-
-        yield return request.SendWebRequest();
-
-        if (request.result != UnityWebRequest.Result.Success)
-        {
-            NotifyFailed($"StateLoader: GET {url} failed: {request.error}");
-            yield break;
-        }
-
-        string json = request.downloadHandler.text;
-        StatePayload payload;
+        isLoading = true;
         try
         {
-            payload = JsonUtility.FromJson<StatePayload>(json);
-        }
-        catch (Exception ex)
-        {
-            NotifyFailed($"StateLoader: invalid JSON from {url}: {ex.Message}");
-            yield break;
-        }
+            if (netConfig == null)
+            {
+                NotifyFailed("StateLoader: NetConfig is missing.");
+                yield break;
+            }
 
-        agents.Clear();
-        if (payload?.agents != null)
-        {
-            agents.AddRange(payload.agents);
-        }
+            string url = netConfig.StateUrl;
+            using UnityWebRequest request = UnityWebRequest.Get(url);
+            request.timeout = timeoutSec;
+            request.SetRequestHeader("Accept", "application/json");
 
-        if (agentRegistry != null)
-        {
-            agentRegistry.CreateOrUpdate(agents);
-        }
+            yield return request.SendWebRequest();
 
-        Debug.Log($"Loaded state: {agents.Count} agents");
-        StateLoaded?.Invoke(agents);
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                NotifyFailed($"StateLoader: GET {url} failed: {request.error}");
+                yield break;
+            }
+
+            string json = request.downloadHandler.text;
+            StatePayload payload;
+            try
+            {
+                payload = JsonUtility.FromJson<StatePayload>(json);
+            }
+            catch (Exception ex)
+            {
+                NotifyFailed($"StateLoader: invalid JSON from {url}: {ex.Message}");
+                yield break;
+            }
+
+            agents.Clear();
+            if (payload?.agents != null)
+            {
+                agents.AddRange(payload.agents);
+            }
+
+            if (agentRegistry != null)
+            {
+                agentRegistry.CreateOrUpdate(agents);
+            }
+
+            hasLoadedOnce = true;
+            Debug.Log($"Loaded state: {agents.Count} agents");
+            StateLoaded?.Invoke(agents);
+        }
+        finally
+        {
+            isLoading = false;
+        }
     }
 
     private void NotifyFailed(string error)
