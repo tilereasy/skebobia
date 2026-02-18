@@ -323,7 +323,7 @@ class LLMClient:
                 f"status={status!r} incomplete={incomplete!r} output_types={self._output_types(as_dict)!r}"
             )
 
-        # Backward-compatible parser for chat.completions-like dicts.
+        # Парсер с обратной совместимостью для словарей в стиле chat.completions.
         if isinstance(response_obj, dict):
             return self._extract_from_chat_choices_dict(response_obj)
 

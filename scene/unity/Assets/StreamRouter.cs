@@ -3,8 +3,12 @@ using UnityEngine;
 
 public sealed class StreamRouter : MonoBehaviour
 {
+    private const int MaxIncomingJsonChars = 120_000;
+    private const int MaxBubbleChars = 280;
+
     [SerializeField] private WsClient wsClient;
     [SerializeField] private AgentRegistry agentRegistry;
+    [SerializeField] private StateLoader stateLoader;
     private bool subscribed;
 
     private void Awake()
@@ -18,6 +22,11 @@ public sealed class StreamRouter : MonoBehaviour
         {
             agentRegistry = FindAnyObjectByType<AgentRegistry>();
         }
+
+        if (stateLoader == null)
+        {
+            stateLoader = FindAnyObjectByType<StateLoader>();
+        }
     }
 
     private void OnEnable()
@@ -30,6 +39,7 @@ public sealed class StreamRouter : MonoBehaviour
         if (subscribed && wsClient != null)
         {
             wsClient.OnMessage -= HandleMessage;
+            wsClient.OnConnected -= HandleConnected;
             subscribed = false;
         }
     }
@@ -60,7 +70,25 @@ public sealed class StreamRouter : MonoBehaviour
         }
 
         wsClient.OnMessage += HandleMessage;
+        wsClient.OnConnected += HandleConnected;
         subscribed = true;
+
+        ReplayLastAgentsStateIfAvailable();
+    }
+
+    private void HandleConnected()
+    {
+        if (stateLoader == null)
+        {
+            stateLoader = FindAnyObjectByType<StateLoader>();
+        }
+
+        if (stateLoader != null)
+        {
+            stateLoader.LoadStateIfNeeded();
+        }
+
+        ReplayLastAgentsStateIfAvailable();
     }
 
     private void HandleMessage(string json)
@@ -70,7 +98,22 @@ public sealed class StreamRouter : MonoBehaviour
             return;
         }
 
-        MessageHeader header = JsonUtility.FromJson<MessageHeader>(json);
+        if (json.Length > MaxIncomingJsonChars)
+        {
+            Debug.LogWarning($"WS message dropped: too large ({json.Length} chars)");
+            return;
+        }
+
+        MessageHeader header;
+        try
+        {
+            header = JsonUtility.FromJson<MessageHeader>(json);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"WS header parse failed: {ex.Message}");
+            return;
+        }
         if (header == null || string.IsNullOrWhiteSpace(header.type))
         {
             Debug.LogWarning($"WS message without type: {json}");
@@ -105,7 +148,16 @@ public sealed class StreamRouter : MonoBehaviour
             }
         }
 
-        AgentsStateMessage message = JsonUtility.FromJson<AgentsStateMessage>(json);
+        AgentsStateMessage message;
+        try
+        {
+            message = JsonUtility.FromJson<AgentsStateMessage>(json);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"agents_state parse failed: {ex.Message}");
+            return;
+        }
         if (message == null || message.payload == null)
         {
             return;
@@ -127,12 +179,40 @@ public sealed class StreamRouter : MonoBehaviour
         Debug.Log($"WS agents_state: {updated} agents");
     }
 
+    private void ReplayLastAgentsStateIfAvailable()
+    {
+        if (wsClient == null)
+        {
+            return;
+        }
+
+        if (!wsClient.TryGetLastAgentsState(out string json))
+        {
+            return;
+        }
+
+        HandleAgentsState(json);
+    }
+
     private void HandleEvent(string json)
     {
-        EventMessage message = JsonUtility.FromJson<EventMessage>(json);
+        EventMessage message;
+        try
+        {
+            message = JsonUtility.FromJson<EventMessage>(json);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"event parse failed: {ex.Message}");
+            return;
+        }
         string text = message != null && message.payload != null && !string.IsNullOrWhiteSpace(message.payload.text)
             ? message.payload.text
             : json;
+        if (text.Length > MaxBubbleChars)
+        {
+            text = text.Substring(0, MaxBubbleChars);
+        }
         Debug.Log($"WS event: {text}");
 
         if (message == null || message.payload == null)

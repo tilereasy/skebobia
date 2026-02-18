@@ -16,6 +16,15 @@ const RECENT_EVENTS_LIMIT = 10;
 const FEEDBACK_TIMEOUT = 5000;
 const GRAPH_NODE_SIZE = 8;
 const GRAPH_NODE_FONT_SIZE = 12;
+const WORLD_ANCHOR_LABELS = {
+  tracks: "у путей",
+  path: "на тропе",
+  vending_machines: "у автоматов",
+  bench: "у лавки",
+  stone_circle: "у круга камней",
+  signpost: "у указателя",
+  bushes_right: "у правых кустов",
+};
 
 const STYLES = `
   @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;900&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');
@@ -31,6 +40,7 @@ const STYLES = `
     --cyan-dim:      rgba(0,220,255,0.6);
     --green:         #00ff9d;
     --green-dim:     rgba(0,255,157,0.6);
+    --world-micro:   #7fff6b;
     --amber:         #ffb627;
     --red:           #ff3d5a;
     --text-primary:  #f0f8ff;
@@ -60,12 +70,12 @@ const STYLES = `
   overflow: auto;
 }
 
-  /* ── Scrollbar ── */
+  /* ── Полоса прокрутки ── */
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border-glow); border-radius: 2px; }
 
-  /* ── Scanline overlay ── */
+  /* ── Оверлей сканлайнов ── */
   #root::before {
     content: '';
     position: fixed; inset: 0; z-index: 9999; pointer-events: none;
@@ -78,7 +88,7 @@ const STYLES = `
     );
   }
 
-  /* ── Grid texture ── */
+  /* ── Текстура сетки ── */
   #root::after {
     content: '';
     position: fixed; inset: 0; z-index: 0; pointer-events: none;
@@ -88,7 +98,7 @@ const STYLES = `
     background-size: 40px 40px;
   }
 
-  /* ── App Shell ── */
+  /* ── Каркас приложения ── */
   .app-shell {
   position: relative;
   z-index: 1;
@@ -98,7 +108,7 @@ const STYLES = `
   overflow: visible;
   }
 
-  /* ── Topbar ── */
+  /* ── Верхняя панель ── */
   .topbar {
     display: flex; align-items: center; justify-content: space-between;
     padding: 10px 20px;
@@ -151,7 +161,7 @@ const STYLES = `
     box-shadow: var(--glow-green), inset 0 0 12px rgba(0,255,157,0.08);
   }
 
-  /* ── WS Pill ── */
+  /* ── Индикатор WS ── */
   .ws-pill {
     font-family: var(--font-display); font-size: 9px; font-weight: 600;
     letter-spacing: 0.15em; text-transform: uppercase;
@@ -169,7 +179,7 @@ const STYLES = `
   .ws-connecting,.ws-reconnecting { color: var(--amber); border-color: rgba(255,182,39,0.4); text-shadow: var(--glow-amber); background-color: rgba(0,255,157,0.04);}
   .ws-error   { color: var(--red);    border-color: rgba(255,61,90,0.4); background-color: rgba(0,255,157,0.04);}
 
-  /* ── Dashboard Grid ── */
+  /* ── Сетка дашборда ── */
   .dashboard-grid {
   flex: 1;
   overflow: visible;
@@ -182,7 +192,7 @@ const STYLES = `
   }
 
 
-  /* ── Panel Base ── */
+  /* ── Основа панели ── */
   .panel {
     background: var(--bg-panel);
     display: flex; flex-direction: column;
@@ -202,7 +212,7 @@ const STYLES = `
 
   .panel-inner { padding: 14px; overflow-y: auto; flex: 1; }
 
-  /* ── Panel Title Row ── */
+  /* ── Строка заголовка панели ── */
   .panel-title-row {
     display: flex; align-items: center; justify-content: space-between;
     padding: 10px 14px 8px;
@@ -220,7 +230,7 @@ const STYLES = `
 
   .panel-title-section { display: flex; align-items: center; gap: 8px; }
 
-  /* ── Inline Controls ── */
+  /* ── Встроенные контролы ── */
   .inline-controls {
     display: flex; align-items: center; gap: 10px;
     flex-wrap: wrap;
@@ -228,7 +238,7 @@ const STYLES = `
 
   label { color: var(--text-secondary); font-size: 11px; }
 
-  select, textarea, input[type="range"] {
+  select, textarea, input[type="range"], input[type="text"], input[type="number"] {
     background: rgba(0,220,255,0.04);
     border: 1px solid var(--border-glow);
     color: var(--text-primary);
@@ -236,11 +246,12 @@ const STYLES = `
     border-radius: 2px; outline: none;
     transition: border-color 0.2s, box-shadow 0.2s;
   }
-  select:focus, textarea:focus {
+  select:focus, textarea:focus, input[type="text"]:focus, input[type="number"]:focus {
     border-color: var(--cyan);
     box-shadow: var(--glow-cyan);
   }
   select { padding: 3px 6px; margin-left: 6px; cursor: pointer; }
+  input[type="text"], input[type="number"] { padding: 4px 6px; width: 100%; }
   textarea { width: 100%; padding: 6px 8px; resize: vertical; min-height: 52px; }
 
   input[type="range"] {
@@ -278,7 +289,7 @@ const STYLES = `
   }
   .collapse-btn:hover { color: var(--cyan); }
 
-  /* ── Checkbox Row ── */
+  /* ── Строка чекбокса ── */
   .checkbox-row {
     display: flex; align-items: center; gap: 5px; cursor: pointer;
   }
@@ -286,7 +297,7 @@ const STYLES = `
     accent-color: var(--cyan); cursor: pointer;
   }
 
-  /* ── Event Filters ── */
+  /* ── Фильтры событий ── */
   .event-filters {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     padding: 6px 14px;
@@ -305,7 +316,7 @@ const STYLES = `
   }
   .filter-checkbox:hover { color: var(--cyan); }
 
-  /* ── Event List ── */
+  /* ── Список событий ── */
   .event-list {
   flex: 1;
   overflow-y: auto;
@@ -334,10 +345,15 @@ const STYLES = `
   .event-type-world    { border-left: 2px solid var(--green); padding-left: 12px; }
   .event-type-system   { border-left: 2px solid var(--amber); padding-left: 12px; }
   .event-type-other    { border-left: 2px solid var(--text-muted); padding-left: 12px; }
+  .event-world-micro {
+    border-left: 2px solid var(--world-micro);
+    background: linear-gradient(90deg, rgba(127,255,107,0.08), rgba(0,0,0,0) 28%);
+  }
 
   .event-meta {
     display: flex; align-items: center; gap: 8px; margin-bottom: 3px;
     font-size: 10px; color: var(--text-muted);
+    flex-wrap: wrap;
   }
   .event-time { color: var(--text-muted); }
   .event-source {
@@ -347,6 +363,24 @@ const STYLES = `
   .event-tags {
     font-size: 9px; color: var(--text-muted);
     background: rgba(0,220,255,0.06); padding: 1px 5px; border-radius: 2px;
+  }
+  .event-badge {
+    font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    border: 1px solid transparent; border-radius: 2px;
+    padding: 1px 5px;
+  }
+  .event-badge-world {
+    color: var(--world-micro);
+    border-color: rgba(127,255,107,0.45);
+    background: rgba(127,255,107,0.1);
+  }
+  .event-anchor {
+    font-size: 10px;
+    color: #d4ffbf;
+    border: 1px solid rgba(127,255,107,0.35);
+    background: rgba(127,255,107,0.08);
+    border-radius: 2px;
+    padding: 1px 6px;
   }
   .event-item p {
     color: #ffffff !important;
@@ -362,7 +396,7 @@ const STYLES = `
     text-transform: uppercase;
   }
 
-  /* ── Graph Panel ── */
+  /* ── Панель графа ── */
   .graph-panel-compact {
   background: var(--bg-panel-alt);
   position: relative;
@@ -383,7 +417,7 @@ const STYLES = `
 
   .muted { font-size: 10px; color: var(--text-muted); }
 
-  /* ── Side Panel ── */
+  /* ── Боковая панель ── */
   
   .side-panel {
   overflow-y: auto;
@@ -397,7 +431,7 @@ const STYLES = `
   }
   .panel-block:last-child { border-bottom: none; }
 
-  /* ── Agent Cards ── */
+  /* ── Карточки агентов ── */
   .agent-cards { padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
 
   .agent-card {
@@ -434,7 +468,7 @@ const STYLES = `
     font-size: 9px; padding: 3px 9px;
   }
 
-  /* ── Mood Badge ── */
+  /* ── Бейдж настроения ── */
   .mood {
     font-family: var(--font-display); font-size: 8px; font-weight: 600;
     letter-spacing: 0.1em; text-transform: uppercase;
@@ -515,7 +549,7 @@ const STYLES = `
     text-shadow: 0 0 8px rgba(255,126,179,0.5);
   }
 
-  /* ── Control Panel ── */
+  /* ── Панель управления ── */
   .control-form {
     display: flex; flex-direction: column; gap: 5px;
     padding: 10px 12px;
@@ -533,7 +567,7 @@ const STYLES = `
     letter-spacing: 0.05em;
   }
 
-  /* ── Inspect Drawer ── */
+  /* ── Выдвижной инспектор ── */
   .inspect-drawer {
     position: fixed; right: 0; top: 0; bottom: 0;
     width: 360px; z-index: 100;
@@ -612,7 +646,7 @@ const STYLES = `
 
   .error-message { color: var(--red); font-size: 11px; padding: 10px 16px; }
 
-  /* ── Loading Screen ── */
+  /* ── Экран загрузки ── */
   .loading-screen {
     display: flex; align-items: center; justify-content: center;
     height: 100vh; flex-direction: column; gap: 16px;
@@ -636,13 +670,15 @@ const STYLES = `
   .dashboard-grid {
     grid-template-columns: 1fr;
     grid-template-areas:
-    "feed graph side"
-    "feed graph side";
+    "feed"
+    "graph"
+    "side";
   }
 
   .feed-panel         { grid-area: feed;}
   .graph-panel-compact { grid-area: graph; }
   .side-panel         { grid-area: side; }
+  .graph-panel-compact { grid-column: auto; }
 }
 `;
 
@@ -688,8 +724,31 @@ function fallbackNodeColor(id) {
 
 function moodClass(moodLabel) { return `mood mood-${moodLabel || "neutral"}`; }
 
+function hasTag(event, expectedTag) {
+  if (!event || !Array.isArray(event.tags)) return false;
+  const needle = String(expectedTag || "").toLowerCase();
+  return event.tags.some((tag) => String(tag || "").toLowerCase() === needle);
+}
+
+function extractEventAnchor(event) {
+  if (event && typeof event.anchor === "string" && event.anchor) return event.anchor;
+  if (!event || !Array.isArray(event.tags)) return "";
+  const anchorTag = event.tags.find((tag) => typeof tag === "string" && tag.startsWith("anchor:"));
+  return anchorTag ? String(anchorTag).split(":", 2)[1] : "";
+}
+
+function anchorLabel(anchor) {
+  if (!anchor) return "";
+  return WORLD_ANCHOR_LABELS[anchor] || anchor.replaceAll("_", " ");
+}
+
+function isWorldMicroEvent(event) {
+  return hasTag(event, "world") && hasTag(event, "micro");
+}
+
 function sourceLabel(event, agentById) {
   if (event.source_id && agentById.has(event.source_id)) return agentById.get(event.source_id).name;
+  if (isWorldMicroEvent(event)) return "World Micro";
   if (event.source_type === "world") return "World";
   return "Unknown";
 }
@@ -720,6 +779,7 @@ export default function App() {
   const [agents, setAgents] = useState([]);
   const [relations, setRelations] = useState({ nodes: [], edges: [] });
   const [events, setEvents] = useState([]);
+  const [simStats, setSimStats] = useState(null);
   const [filterAgentId, setFilterAgentId] = useState("all");
   const [autoScroll, setAutoScroll] = useState(true);
   const [wsStatus, setWsStatus] = useState("connecting");
@@ -730,6 +790,11 @@ export default function App() {
   const [worldEventText, setWorldEventText] = useState("");
   const [messageText, setMessageText] = useState("");
   const [messageAgentId, setMessageAgentId] = useState("");
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentTraits, setNewAgentTraits] = useState("нейтральный, любопытный");
+  const [newAgentMood, setNewAgentMood] = useState(0);
+  const [newAgentAvatar, setNewAgentAvatar] = useState("");
+  const [removeAgentId, setRemoveAgentId] = useState("");
   const [speed, setSpeed] = useState(1);
   const [controlFeedback, setControlFeedback] = useState("");
   const [isInitialLoading, setIsInitialLoading] = useState(true);
@@ -762,13 +827,25 @@ export default function App() {
   const buildLocalInspectData = useCallback((agentId) => {
     const agent = agentById.get(agentId);
     if (!agent) return null;
+    const relationItems = (relations.edges || [])
+      .filter((e) => e.from === agentId)
+      .map((e) => ({
+        agent_id: e.to,
+        name: agentById.get(e.to)?.name || e.to,
+        value: Number(e.value || 0),
+      }))
+      .sort((a, b) => b.value - a.value);
     return {
       id: agent.id, name: agent.name, traits: "n/a (local fallback)",
       mood: agent.mood, mood_label: agent.mood_label, current_plan: agent.current_plan,
       key_memories: [{ text: "Inspector fallback from live stream.", score: null }],
       recent_events: events.filter((e) => e.source_id === agentId).slice(-RECENT_EVENTS_LIMIT),
+      relations_snapshot: {
+        top_positive: relationItems.filter((i) => i.value >= 0).slice(0, 3),
+        top_negative: relationItems.filter((i) => i.value < 0).slice(-3).reverse(),
+      },
     };
-  }, [agentById, events]);
+  }, [agentById, events, relations.edges]);
 
   const fetchInspect = useCallback(async (agentId) => {
     if (!agentId) return;
@@ -802,6 +879,14 @@ export default function App() {
         setRelations(s.relations || { nodes: [], edges: [] });
         setEvents(trimEvents(Array.isArray(s.events) ? s.events : []));
         if (typeof s.speed === "number") setSpeed(s.speed);
+        setSimStats({
+          tick: s.tick,
+          speed: s.speed,
+          runtime: s.runtime || null,
+          llm_stats: s.llm_stats || null,
+          world_event_stats: s.world_event_stats || null,
+          memory_stats: s.memory_stats || null,
+        });
       } catch (e) { setControlFeedback(`Load failed: ${e}`); }
       finally { setIsInitialLoading(false); }
     }
@@ -811,7 +896,8 @@ export default function App() {
   useEffect(() => {
     if (agents.length === 0) return;
     if (!messageAgentId || !agents.some((a) => a.id === messageAgentId)) setMessageAgentId(agents[0].id);
-  }, [agents, messageAgentId]);
+    if (!removeAgentId || !agents.some((a) => a.id === removeAgentId)) setRemoveAgentId(agents[0].id);
+  }, [agents, messageAgentId, removeAgentId]);
 
   useEffect(() => {
     if (filterAgentId !== "all" && !agents.some((a) => a.id === filterAgentId)) setFilterAgentId("all");
@@ -833,7 +919,7 @@ export default function App() {
     const obs = new ResizeObserver(update);
     obs.observe(target);
     return () => obs.disconnect();
-  }, []);
+  }, [collapsedPanels.graph]);
 
   useEffect(() => {
     shouldReconnectRef.current = true;
@@ -866,6 +952,32 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (isInitialLoading) return undefined;
+    let alive = true;
+    const refresh = async () => {
+      try {
+        const s = await fetchJson(apiPath("/api/state"), { method: "GET", headers: { Accept: "application/json" } });
+        if (!alive) return;
+        setSimStats({
+          tick: s.tick,
+          speed: s.speed,
+          runtime: s.runtime || null,
+          llm_stats: s.llm_stats || null,
+          world_event_stats: s.world_event_stats || null,
+          memory_stats: s.memory_stats || null,
+        });
+      } catch (_e) {
+        // периодическое обновление статистики
+      }
+    };
+    const timer = setInterval(refresh, 3000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [isInitialLoading]);
+
   async function submitWorldEvent(e) {
     e.preventDefault();
     const text = worldEventText.trim();
@@ -891,6 +1003,35 @@ export default function App() {
     } catch (err) { setControlFeedback(`Error: ${err}`); }
   }
 
+  async function submitAddAgent(e) {
+    e.preventDefault();
+    const name = newAgentName.trim();
+    if (!name) return;
+    try {
+      await postJson("/api/control/agent/add", {
+        name,
+        traits: newAgentTraits.trim() || "нейтральный",
+        mood: Number(newAgentMood),
+        avatar: newAgentAvatar.trim() || null,
+      });
+      setNewAgentName("");
+      setControlFeedback("Agent added");
+    } catch (err) {
+      setControlFeedback(`Error: ${err}`);
+    }
+  }
+
+  async function submitRemoveAgent(e) {
+    e.preventDefault();
+    if (!removeAgentId) return;
+    try {
+      await postJson("/api/control/agent/remove", { agent_id: removeAgentId });
+      setControlFeedback("Agent removed");
+    } catch (err) {
+      setControlFeedback(`Error: ${err}`);
+    }
+  }
+
   if (isInitialLoading) {
     return (
       <>
@@ -908,7 +1049,7 @@ export default function App() {
       <style>{STYLES}</style>
       <div className="app-shell">
 
-        {/* ── Header ── */}
+        {/* ── Шапка ── */}
         <header className="topbar">
           <div className="topbar-brand">
             <div className="topbar-logo" aria-hidden="true" />
@@ -970,16 +1111,25 @@ export default function App() {
               {filteredEvents.length === 0 && <div className="empty-state">No events match filters</div>}
               {filteredEvents.map((event) => {
                 const type = getEventType(event);
+                const worldMicro = isWorldMicroEvent(event);
+                const anchor = extractEventAnchor(event);
                 return (
-                  <article key={event.id} className={`event-item event-type-${type}`}>
+                  <article key={event.id} className={`event-item event-type-${type}${worldMicro ? " event-world-micro" : ""}`}>
                     <div className="event-meta">
                       <span className="event-time">{event.ts || "—"}</span>
                       <span className="event-source">{sourceLabel(event, agentById)}</span>
+                      {worldMicro && <span className="event-badge event-badge-world">world micro</span>}
+                      {anchor && <span className="event-anchor">{anchorLabel(anchor)}</span>}
                       {Array.isArray(event.tags) && event.tags.length > 0 && (
                         <span className="event-tags">{event.tags.join(", ")}</span>
                       )}
                     </div>
                     <p>{event.text}</p>
+                    {Array.isArray(event.evidence_ids) && event.evidence_ids.length > 0 && (
+                      <div className="event-meta" style={{ marginTop: 4 }}>
+                        <span className="event-tags">evidence: {event.evidence_ids.join(", ")}</span>
+                      </div>
+                    )}
                   </article>
                 );
               })}
@@ -997,37 +1147,39 @@ export default function App() {
               </div>
             </div>
             {!collapsedPanels.graph && (
-            <ForceGraph2D
-              graphData={graphData}
-              width={window.innerWidth}
-              height={400}
-              linkSource="from"
-              linkTarget="to"
-              backgroundColor="transparent"
-              nodeLabel={(n) => n.name}
-              linkColor={(l) => l.value >= 0 ? "rgba(0,255,157,0.8)" : "rgba(255,61,90,0.8)"}
-              linkWidth={(l) => 1.5 + Math.abs(l.value || 0) / 20}
-              enableNodeDrag={true}
-              enableZoomInteraction={true}
-              nodeCanvasObject={(node, ctx, globalScale) => {
-                const label = node.name || node.id;
-                const fontSize = GRAPH_NODE_FONT_SIZE / globalScale;
-                ctx.shadowColor = node.color || fallbackNodeColor(node.id);
-                ctx.shadowBlur = 12;
-                ctx.beginPath();
-                ctx.arc(node.x, node.y, GRAPH_NODE_SIZE, 0, 2 * Math.PI);
-                ctx.fillStyle = node.color || fallbackNodeColor(node.id);
-                ctx.fill();
-                ctx.shadowBlur = 0;
-                ctx.strokeStyle = "rgba(0,220,255,0.4)";
-                ctx.lineWidth = 1;
-                ctx.stroke();
-                ctx.font = `${fontSize}px 'Space Mono'`;
-                ctx.fillStyle = "#e8f4ff";
-                ctx.fillText(label, node.x + GRAPH_NODE_SIZE + 3, node.y + fontSize / 3);
-              }}
-              onNodeClick={(node) => fetchInspect(node.id)}
-            />
+            <div className="graph-body" ref={graphWrapRef}>
+              <ForceGraph2D
+                graphData={graphData}
+                width={graphSize.width}
+                height={graphSize.height}
+                linkSource="from"
+                linkTarget="to"
+                backgroundColor="transparent"
+                nodeLabel={(n) => n.name}
+                linkColor={(l) => l.value >= 0 ? "rgba(0,255,157,0.8)" : "rgba(255,61,90,0.8)"}
+                linkWidth={(l) => 1.5 + Math.abs(l.value || 0) / 20}
+                enableNodeDrag={true}
+                enableZoomInteraction={true}
+                nodeCanvasObject={(node, ctx, globalScale) => {
+                  const label = node.name || node.id;
+                  const fontSize = GRAPH_NODE_FONT_SIZE / globalScale;
+                  ctx.shadowColor = node.color || fallbackNodeColor(node.id);
+                  ctx.shadowBlur = 12;
+                  ctx.beginPath();
+                  ctx.arc(node.x, node.y, GRAPH_NODE_SIZE, 0, 2 * Math.PI);
+                  ctx.fillStyle = node.color || fallbackNodeColor(node.id);
+                  ctx.fill();
+                  ctx.shadowBlur = 0;
+                  ctx.strokeStyle = "rgba(0,220,255,0.4)";
+                  ctx.lineWidth = 1;
+                  ctx.stroke();
+                  ctx.font = `${fontSize}px 'Space Mono'`;
+                  ctx.fillStyle = "#e8f4ff";
+                  ctx.fillText(label, node.x + GRAPH_NODE_SIZE + 3, node.y + fontSize / 3);
+                }}
+                onNodeClick={(node) => fetchInspect(node.id)}
+              />
+            </div>
           )}
           </section>
 
@@ -1088,6 +1240,49 @@ export default function App() {
                     />
                     <button type="submit">↗ Apply</button>
                   </form>
+
+                  <form onSubmit={submitAddAgent} className="control-form">
+                    <label htmlFor="agent-name">Add Agent</label>
+                    <input
+                      id="agent-name"
+                      type="text"
+                      value={newAgentName}
+                      onChange={(e) => setNewAgentName(e.target.value)}
+                      placeholder="Имя агента"
+                    />
+                    <input
+                      type="text"
+                      value={newAgentTraits}
+                      onChange={(e) => setNewAgentTraits(e.target.value)}
+                      placeholder="Черты"
+                    />
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        type="number"
+                        min={-100}
+                        max={100}
+                        value={newAgentMood}
+                        onChange={(e) => setNewAgentMood(Number(e.target.value))}
+                        style={{ width: 84 }}
+                        placeholder="Mood"
+                      />
+                      <input
+                        type="text"
+                        value={newAgentAvatar}
+                        onChange={(e) => setNewAgentAvatar(e.target.value)}
+                        placeholder="#hex (опц.)"
+                      />
+                    </div>
+                    <button type="submit">↗ Add Agent</button>
+                  </form>
+
+                  <form onSubmit={submitRemoveAgent} className="control-form">
+                    <label htmlFor="remove-agent">Remove Agent</label>
+                    <select id="remove-agent" value={removeAgentId} onChange={(e) => setRemoveAgentId(e.target.value)}>
+                      {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                    </select>
+                    <button type="submit">↗ Remove Agent</button>
+                  </form>
                 </>
               )}
 
@@ -1096,6 +1291,42 @@ export default function App() {
                   ✓ {controlFeedback}
                 </p>
               )}
+            </div>
+
+            <div className="panel-block">
+              <div className="panel-title-row">
+                <h2>Live Metrics</h2>
+              </div>
+              <div className="inspect-content" style={{ gap: 6 }}>
+                <div className="inspect-field">
+                  <span className="field-label">Tick</span>
+                  <span className="field-value">{simStats?.tick ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">Queue Pending</span>
+                  <span className="field-value">{simStats?.llm_stats?.reply_queue?.pending ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">Avg Tick ms</span>
+                  <span className="field-value">{simStats?.runtime?.avg_tick_ms ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">World / 100 ticks</span>
+                  <span className="field-value">{simStats?.world_event_stats?.metrics?.world_events_per_100_ticks ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">World evidence ratio</span>
+                  <span className="field-value">{simStats?.world_event_stats?.metrics?.agent_world_evidence_ratio_100_ticks ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">Repeat ratio (50)</span>
+                  <span className="field-value">{simStats?.world_event_stats?.metrics?.dialogue_repeat_ratio_recent_50 ?? "—"}</span>
+                </div>
+                <div className="inspect-field">
+                  <span className="field-label">Memory entries</span>
+                  <span className="field-value">{simStats?.memory_stats?.entries ?? "—"}</span>
+                </div>
+              </div>
             </div>
           </section>
         </main>
@@ -1159,6 +1390,20 @@ export default function App() {
                   {(inspectData.recent_events || []).map((e) => (
                     <li key={e.id}>
                       <span>{e.ts || "—"}</span>{e.text}
+                    </li>
+                  ))}
+                </ul>
+
+                <div className="inspect-section-title">Relations</div>
+                <ul className="inspect-list">
+                  {(inspectData.relations_snapshot?.top_positive || []).map((item) => (
+                    <li key={`rel-pos-${item.agent_id}`}>
+                      <span>+{item.value}</span>{item.name}
+                    </li>
+                  ))}
+                  {(inspectData.relations_snapshot?.top_negative || []).map((item) => (
+                    <li key={`rel-neg-${item.agent_id}`}>
+                      <span>{item.value}</span>{item.name}
                     </li>
                   ))}
                 </ul>

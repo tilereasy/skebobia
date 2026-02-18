@@ -4,6 +4,8 @@ using UnityEngine;
 
 public sealed class AgentView : MonoBehaviour
 {
+    private const int MaxBubbleTextChars = 420;
+
     [SerializeField, Min(0.1f)] private float moveSpeed = 5f;
     [SerializeField] private GameObject speechBubblePrefab;
     [SerializeField] private Vector3 speechBubbleOffset = new Vector3(0.2f, 1.6f, 0f);
@@ -48,7 +50,12 @@ public sealed class AgentView : MonoBehaviour
             return;
         }
 
-        bubbleText.text = text.Trim();
+        string normalized = text.Trim();
+        if (normalized.Length > MaxBubbleTextChars)
+        {
+            normalized = normalized.Substring(0, MaxBubbleTextChars);
+        }
+        bubbleText.text = normalized;
         bubbleInstance.SetActive(true);
 
         if (hideBubbleCoroutine != null)

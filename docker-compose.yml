@@ -24,7 +24,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-skebobia}
       MEMORY_DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-skebobia}
     ports:
-      # Keep direct access for legacy clients/builds that still target :8000.
+      # Оставляем прямой доступ для старых клиентов/сборок, которые все еще ходят на :8000.
       - "8000:8000"
     depends_on:
       postgres:

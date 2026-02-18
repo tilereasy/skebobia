@@ -4,6 +4,8 @@ using TMPro;
 
 public sealed class AgentRegistry : MonoBehaviour
 {
+    private const int MaxNameChars = 64;
+
     [SerializeField] private Transform agentsRoot;
     [SerializeField] private GameObject agentPrefab; 
     [SerializeField] private GameObject speechBubblePrefab;
@@ -152,6 +154,10 @@ public sealed class AgentRegistry : MonoBehaviour
         agentView.SetTargetPosition(world2D, snapPosition);
 
         string displayName = string.IsNullOrWhiteSpace(state.name) ? state.id : state.name;
+        if (displayName.Length > MaxNameChars)
+        {
+            displayName = displayName.Substring(0, MaxNameChars);
+        }
         agentObject.name = $"Agent_{state.id}_{displayName}";
 
         TMP_Text label = EnsureLabel(state.id, agentObject);

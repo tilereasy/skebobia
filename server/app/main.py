@@ -4,17 +4,24 @@ import asyncio
 import contextlib
 import json
 import os
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.db.models import ControlEventIn, ControlMessageIn, ControlSpeedIn
+from app.db.models import (
+    ControlAgentAddIn,
+    ControlAgentRemoveIn,
+    ControlEventIn,
+    ControlMessageIn,
+    ControlSpeedIn,
+)
 from app.sim.engine import StubWorld
 
 
 def _load_env_from_repo_root() -> None:
-    # server/app/main.py -> repo root is 2 levels up from "server"
+    # server/app/main.py -> корень репозитория на 2 уровня выше папки "server"
     env_path = Path(__file__).resolve().parents[2] / ".env"
     if not env_path.exists():
         return
@@ -95,6 +102,7 @@ async def tick_loop() -> None:
     while True:
         await asyncio.sleep(max(0.1, TICK_INTERVAL_SEC) / max(world.speed, 0.1))
 
+        started_at = time.perf_counter()
         before_event_id = world.world_state.next_event_id
         result = world.step()
         await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
@@ -104,9 +112,19 @@ async def tick_loop() -> None:
         if result.relations_changed:
             await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
 
+        tick_ms = (time.perf_counter() - started_at) * 1000.0
+        avg = getattr(app.state, "avg_tick_ms", 0.0)
+        if avg <= 0.0:
+            app.state.avg_tick_ms = tick_ms
+        else:
+            app.state.avg_tick_ms = (avg * 0.88) + (tick_ms * 0.12)
+        app.state.last_tick_ms = tick_ms
+
 
 @app.on_event("startup")
 async def startup() -> None:
+    app.state.last_tick_ms = 0.0
+    app.state.avg_tick_ms = 0.0
     app.state.tick_task = asyncio.create_task(tick_loop())
 
 
@@ -126,7 +144,12 @@ async def health() -> dict:
 
 @app.get("/api/state")
 async def state() -> dict:
-    return world.state_payload()
+    payload = world.state_payload()
+    payload["runtime"] = {
+        "last_tick_ms": round(float(getattr(app.state, "last_tick_ms", 0.0)), 3),
+        "avg_tick_ms": round(float(getattr(app.state, "avg_tick_ms", 0.0)), 3),
+    }
+    return payload
 
 
 @app.get("/api/agents")
@@ -173,17 +196,64 @@ async def control_message(payload: ControlMessageIn) -> dict:
         event, reply = world.add_agent_message(payload.agent_id, payload.text)
     except KeyError:
         raise HTTPException(status_code=404, detail="agent not found") from None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     for emitted_event in world.events_since(before_event_id):
         await hub.broadcast({"type": "event", "payload": emitted_event})
     await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
     await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
-    return {"accepted": True, "reply_event_id": reply["id"]}
+    return {
+        "accepted": True,
+        "event_id": event["id"],
+        "reply_event_id": reply["id"] if reply is not None else None,
+        "reply_pending": reply is None,
+    }
 
 
 @app.post("/api/control/speed")
 async def control_speed(payload: ControlSpeedIn) -> dict:
     speed = world.update_speed(payload.speed)
     return {"speed": speed}
+
+
+@app.post("/api/control/agent/add")
+async def control_agent_add(payload: ControlAgentAddIn) -> dict:
+    before_event_id = world.world_state.next_event_id
+    try:
+        added = world.add_agent(
+            agent_id=payload.id,
+            name=payload.name,
+            traits=payload.traits,
+            mood=payload.mood,
+            avatar=payload.avatar,
+            pos_x=payload.pos_x,
+            pos_z=payload.pos_z,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    for emitted_event in world.events_since(before_event_id):
+        await hub.broadcast({"type": "event", "payload": emitted_event})
+    await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
+    await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
+    return {"accepted": True, "agent": added.to_agent_summary()}
+
+
+@app.post("/api/control/agent/remove")
+async def control_agent_remove(payload: ControlAgentRemoveIn) -> dict:
+    before_event_id = world.world_state.next_event_id
+    try:
+        removed = world.remove_agent(payload.agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except KeyError:
+        raise HTTPException(status_code=404, detail="agent not found") from None
+
+    for emitted_event in world.events_since(before_event_id):
+        await hub.broadcast({"type": "event", "payload": emitted_event})
+    await hub.broadcast({"type": "agents_state", "payload": world.agents_state_payload()})
+    await hub.broadcast({"type": "relations", "payload": world.relations_payload()})
+    return {"accepted": True, "agent_id": removed.id}
 
 
 @app.websocket("/ws/stream")

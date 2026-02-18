@@ -57,6 +57,7 @@ class AgentState:
     message_cooldown: int = 0
     last_topic: str = ""
     last_interaction_tick: int = 0
+    last_question_tick: int = -1000
 
     @property
     def mood_label(self) -> str:

@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace Cainos.PixelArtTopDown_Basic
 {
-    //let camera follow target
+    // камера следует за целью
     public class CameraFollow : MonoBehaviour
     {
         public Transform target;

@@ -39,7 +39,11 @@ class AgentDecision(BaseModel):
     goal: str = Field(min_length=1, max_length=120)
     act: Literal["move", "say", "message", "idle"] = Field(validation_alias=AliasChoices("act", "action"))
     target_id: str | None = Field(default=None, max_length=64)
-    say_text: str | None = Field(default=None, max_length=280)
+    say_text: str | None = Field(default=None, max_length=360)
+    speech_intent: Literal["inform", "propose", "ask", "confirm", "coordinate"] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("speech_intent", "speechIntent", "utterance_role", "reply_role", "speech_role"),
+    )
     move_to: MoveTo | None = None
     evidence_ids: list[str] | None = Field(default=None, max_length=3)
     deltas: DecisionDeltas | None = None
@@ -58,7 +62,20 @@ class AgentDecision(BaseModel):
             if not say_text or say_text.lower() in {"null", "none", "nil", "n/a"}:
                 self.say_text = None
             else:
-                self.say_text = say_text[:280]
+                self.say_text = say_text[:360]
+                words = [token for token in self.say_text.split() if any(ch.isalpha() for ch in token)]
+                if len(words) < 2:
+                    self.say_text = None
+
+        if self.speech_intent is not None:
+            role = self.speech_intent.strip().lower()
+            allowed_roles = {"inform", "propose", "ask", "confirm", "coordinate"}
+            if role in {"null", "none", "nil", "n/a", ""}:
+                self.speech_intent = None
+            elif role in allowed_roles:
+                self.speech_intent = role  # type: ignore[assignment]
+            else:
+                self.speech_intent = None
 
         if self.evidence_ids is not None:
             normalized_evidence_ids: list[str] = []
@@ -87,8 +104,21 @@ class AgentDecision(BaseModel):
             self.move_to = None
         if self.act not in {"say", "message"}:
             self.say_text = None
+            self.speech_intent = None
         if self.act == "idle":
             self.target_id = None
+        if self.act in {"say", "message"} and self.say_text and self.speech_intent is None:
+            lowered = self.say_text.lower()
+            if "?" in lowered:
+                self.speech_intent = "ask"
+            elif any(token in lowered for token in ("предлага", "давай", "план", "собер")):
+                self.speech_intent = "propose"
+            elif any(token in lowered for token in ("принял", "понял", "согласен", "подтвержда")):
+                self.speech_intent = "confirm"
+            elif any(token in lowered for token in ("в", "у", "через")) and self.act == "message":
+                self.speech_intent = "coordinate"
+            else:
+                self.speech_intent = "inform"
         return self
 
 
@@ -396,6 +426,10 @@ class LLMTickDecider:
                 "act",
                 "action",
                 "kind",
+                "speech_intent",
+                "speechIntent",
+                "utterance_role",
+                "reply_role",
                 "goal",
                 "plan",
                 "say_text",
@@ -449,14 +483,21 @@ class LLMTickDecider:
             candidate,
             ("say_text", "sayText", "text", "message", "utterance", "speech", "content", "reply"),
         )
+        speech_intent = self._first_str(
+            candidate,
+            ("speech_intent", "speechIntent", "utterance_role", "reply_role", "speech_role"),
+        )
+        if speech_intent:
+            speech_intent = speech_intent.lower()
         move_to = self._extract_move_to(candidate)
         evidence_ids = self._extract_evidence_ids(candidate)
         deltas = self._extract_deltas(candidate)
 
         if act in {"say", "message"} and say_text:
-            say_text = say_text[:280]
+            say_text = say_text[:360]
         if act not in {"say", "message"}:
             say_text = None
+            speech_intent = None
         if act != "move":
             move_to = None
 
@@ -466,6 +507,7 @@ class LLMTickDecider:
             "act": act,
             "target_id": target_id[:64] if target_id else None,
             "say_text": say_text,
+            "speech_intent": speech_intent,
             "move_to": move_to,
             "evidence_ids": evidence_ids,
             "deltas": deltas,
@@ -628,32 +670,33 @@ class LLMTickDecider:
 
     def _system_prompt(self) -> str:
         return (
-            "You are a decision engine for a live multi-agent social simulation.\n"
-            "Output strictly ONE minified JSON object on a single line.\n"
-            "No markdown, no comments, no code fences, no trailing text.\n"
+            "You choose actions for agents in a live social simulation.\n"
+            "Return strictly ONE minified JSON object on a single line.\n"
+            "No markdown, no comments, no trailing text.\n"
             "Use JSON null values, never the string \"null\".\n"
-            "Use only ids from USER_CONTEXT_JSON.expected_agent_ids.\n"
-            "Return exactly one decision per expected agent id.\n"
+            "Return exactly one decision for each id in USER_CONTEXT_JSON.expected_agent_ids.\n"
+            "Use only those ids.\n"
             "If a field is not used, set null.\n"
-            "The server is authoritative and may reject unsafe choices.\n"
-            "Actions must keep social coherence and avoid pointless isolation.\n"
-            "Primary dialogue language is Russian unless incoming context is clearly another language.\n"
-            "Use each agent's mood, traits and recent context to create distinct voice per agent.\n"
-            "Avoid generic assistant boilerplate (e.g. 'I'm here for you').\n"
-            "Do not mirror or copy recent messages verbatim; rephrase with new wording.\n"
-            "say_text must reference a concrete context signal (topic, inbox item, relation, or world event).\n"
-            "For act='move' set say_text=null.\n"
-            "Keep strings short: goal up to 60 chars, say_text up to 90 chars.\n"
             "Use agent.allowed_actions and state.cooldowns as hard constraints.\n"
-            "If say/message cooldown > 0, do not choose that action.\n"
-            "If agent.queue.selected_for_reply is true, focus response on agent.queue.text.\n"
-            "If queue.source_type is agent and message action is allowed, prefer act='message' to queue.source_id.\n"
-            "If queue.source_type is world and queue.allow_move_instead_of_say is true, act can be 'say' or 'move'.\n"
-            "When queue.selected_for_reply is true and queue.reply_policy.can_skip is false, avoid idle.\n"
-            "When queue.selected_for_reply is true and queue.reply_policy.can_skip is true, idle is allowed rarely.\n"
-            "If dialogue is allowed for multiple agents, keep the configured minimum share as say/message.\n"
-            "If state.last_action was 'move', prefer continuing the same move target and avoid coordinate jitter.\n"
-            "Use evidence_ids to reference up to 3 relevant ids from recent_events/inbox/memories_top when possible.\n"
+            "If an action is unavailable, choose idle.\n"
+            "If queue.must_message_source is true, act must be 'message' and target_id must equal queue.source_id.\n"
+            "If queue.answer_first is true, answer queue.text directly and do not ask a new question.\n"
+            "If queue.question_allowed_now is false, say_text must not contain '?'.\n"
+            "Primary dialogue language is Russian unless context is clearly another language.\n"
+            "Agents must speak in first person and never describe themselves in third person.\n"
+            "Avoid bureaucratic or project-management tone.\n"
+            "Never say: 'принял', 'задача', 'синхронизировать шаги', 'уточню факт', 'вернусь с результатом'.\n"
+            "Do not summon, call over, or reposition others (no 'подойди', 'иди сюда', 'встретимся', 'подтянись').\n"
+            "Do not repeat interpretation already expressed by another agent.\n"
+            "Choose a unique stance.\n"
+            "Avoid meta-talk about communication process itself and abstract 'steps'.\n"
+            "If speaking, prefer emotion, concrete observation, and personal thought.\n"
+            "Do not copy recent messages verbatim.\n"
+            "One-word replies are forbidden.\n"
+            "Use evidence_ids (up to 3 ids) when relevant.\n"
+            "If world.recent_events contains world+micro, at least one eligible agent should react via say/message.\n"
+            "When reacting to world+micro, include that world event id in evidence_ids whenever relevant.\n"
+            "If queue.first_world_reaction is true, say_text must not contain '?'.\n"
             "\n"
             "Format:\n"
             "{\n"
@@ -664,6 +707,7 @@ class LLMTickDecider:
             '      "act": "move|say|message|idle",\n'
             '      "target_id": "agent id|null",\n'
             '      "say_text": "text|null",\n'
+            '      "speech_intent": "inform|propose|ask|confirm|coordinate|null",\n'
             '      "move_to": {"x": number, "z": number} | null,\n'
             '      "evidence_ids": ["id1","id2"] | null,\n'
             '      "deltas": {"self_mood": int(-10..10), "relations":[{"to_id":"id","delta":int(-5..5)}]} | null\n'
@@ -684,7 +728,11 @@ class LLMTickDecider:
         selected_for_reply = 0
         can_skip_selected = 0
         must_text_reply_selected = 0
+        must_message_selected = 0
         world_action_reply_selected = 0
+        answer_first_selected = 0
+        question_blocked_agents = 0
+        impulse_agents_without_inbox = 0
         for agent_ctx in agents_context:
             if not isinstance(agent_ctx, dict):
                 continue
@@ -694,11 +742,24 @@ class LLMTickDecider:
             queue = agent_ctx.get("queue")
             if not isinstance(queue, dict):
                 continue
+            if (
+                bool(queue.get("internal_impulse_20pct"))
+                and int(queue.get("pending_inbox_count", 0)) == 0
+            ):
+                impulse_agents_without_inbox += 1
+            if bool(queue.get("answer_first")) or queue.get("question_allowed_now") is False:
+                question_blocked_agents += 1
             if queue.get("selected_for_reply") is not True:
                 continue
             selected_for_reply += 1
+            if bool(queue.get("answer_first")):
+                answer_first_selected += 1
             if bool(queue.get("allow_move_instead_of_say")):
                 world_action_reply_selected += 1
+                continue
+            if bool(queue.get("must_message_source")):
+                must_message_selected += 1
+                must_text_reply_selected += 1
                 continue
             reply_policy = queue.get("reply_policy")
             can_skip = isinstance(reply_policy, dict) and bool(reply_policy.get("can_skip"))
@@ -708,7 +769,7 @@ class LLMTickDecider:
                 must_text_reply_selected += 1
 
         if selected_for_reply > 0:
-            # Allow skips for a minority of selected agents, but keep most actions as replies.
+            # Разрешаем пропуски только для меньшинства выбранных агентов, но большинство действий остаются ответами.
             max_skip_actions = min(can_skip_selected, max(1, selected_for_reply // 3))
             min_dialogue_actions = max(0, max(
                 must_text_reply_selected,
@@ -717,6 +778,36 @@ class LLMTickDecider:
             )
         else:
             min_dialogue_actions = 0 if dialogue_capable == 0 else max(1, dialogue_capable // 2)
+
+        recent_world_micro_event_ids: list[str] = []
+        world_recent_events = world_summary.get("recent_events")
+        if isinstance(world_recent_events, list):
+            for event in reversed(world_recent_events):
+                if not isinstance(event, dict):
+                    continue
+                tags = event.get("tags")
+                if not isinstance(tags, list):
+                    continue
+                normalized_tags = {str(tag).lower() for tag in tags}
+                if "world" not in normalized_tags or "micro" not in normalized_tags:
+                    continue
+                event_id = event.get("id")
+                if isinstance(event_id, str) and event_id.strip():
+                    recent_world_micro_event_ids.append(event_id.strip())
+                    if len(recent_world_micro_event_ids) >= 4:
+                        break
+
+        if recent_world_micro_event_ids and dialogue_capable > 0:
+            # Микро-бонус: если world/micro только что произошел, подталкиваем хотя бы еще одно диалоговое действие.
+            min_dialogue_actions = max(
+                min_dialogue_actions,
+                min(dialogue_capable, min_dialogue_actions + 1),
+            )
+        if impulse_agents_without_inbox > 0 and dialogue_capable > 0:
+            min_dialogue_actions = min(
+                dialogue_capable,
+                min_dialogue_actions + impulse_agents_without_inbox,
+            )
 
         return {
             "task": "Return one decision per expected_agent_ids entry for the current tick.",
@@ -729,21 +820,46 @@ class LLMTickDecider:
                 "must_sound_in_world": True,
                 "avoid_verbatim_repeat": True,
                 "avoid_generic_assistant_tone": True,
+                "first_person_only": True,
+                "avoid_process_talk": True,
+                "do_not_repeat_interpretation": True,
+                "choose_unique_stance": True,
+                "prefer_react_to_world_micro": bool(recent_world_micro_event_ids),
             },
             "hard_limits": {
                 "decisions_count_must_match_agents_input": True,
                 "agent_ids_must_match_expected_agent_ids": True,
                 "max_goal_len": 120,
-                "max_say_text_len": 280,
+                "max_say_text_len": 360,
                 "prefer_goal_len": 60,
-                "prefer_say_text_len": 90,
+                "prefer_say_text_len": 180,
+                "min_words_for_reply_text": 8,
                 "max_evidence_ids": 3,
+                "allowed_speech_intents": ["inform", "propose", "ask", "confirm", "coordinate"],
                 "anti_jitter_move_when_last_action_move": True,
                 "min_say_or_message_actions_if_allowed": min_dialogue_actions,
                 "selected_for_reply_agents": selected_for_reply,
+                "selected_reply_answer_first_agents": answer_first_selected,
+                "selected_reply_must_message_agents": must_message_selected,
                 "selected_reply_agents_allowing_move_action": world_action_reply_selected,
-                "max_idle_in_selected_queue": 0 if selected_for_reply == 0 else (selected_for_reply - min_dialogue_actions),
+                "recent_world_micro_event_ids": recent_world_micro_event_ids,
+                "prefer_world_micro_reaction": bool(recent_world_micro_event_ids),
+                "impulse_agents_without_inbox": impulse_agents_without_inbox,
+                "internal_impulse_probability_if_no_inbox": 0.2,
+                "max_question_actions_for_tick": max(0, len(expected_agent_ids) - question_blocked_agents),
+                "max_idle_in_selected_queue": 0 if selected_for_reply == 0 else max(0, selected_for_reply - min_dialogue_actions),
                 "response_should_be_minified_json_single_line": True,
                 "allowed_act_values": ["move", "say", "message", "idle"],
+                "forbidden_phrases": [
+                    "принял",
+                    "задача",
+                    "синхронизировать шаги",
+                    "уточню факт",
+                    "вернусь с результатом",
+                    "подойди",
+                    "иди сюда",
+                    "встретимся",
+                    "подтянись",
+                ],
             },
         }
